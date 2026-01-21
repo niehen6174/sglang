@@ -16,6 +16,8 @@ from .utils import (
     is_empty_image,
 )
 
+import uuid
+
 
 class SGLDOptions:
     @classmethod
@@ -23,6 +25,7 @@ class SGLDOptions:
         return {
             "required": {},
             "optional": {
+                "model_type": (["auto-detect", "qwen_image", "qwen_image_edit", "flux", "lumina2"], {"default": "auto-detect"}),
                 "enable_torch_compile": (
                     "BOOLEAN",
                     {"default": False},
@@ -108,6 +111,43 @@ class SGLDOptions:
         options = {k: v for k, v in options.items() if v is not None}
         return (options,)
 
+class SGLDLoraLoader:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": { "model": ("MODEL",),
+                        "lora_name": (folder_paths.get_filename_list("loras"), ),
+                        "strength_model": ("FLOAT", {"default": 1.0, "min": 0, "max": 10, "step": 0.01}),
+                        "nickname": ("STRING", {"default": ""}),
+                        "target": (["all", "transformer", "transformer_2", "critic"], {"default": "all"}),
+                        },
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load_lora"
+
+    CATEGORY = "SGLDiffusion"
+
+    def load_lora(self, model, lora_name, strength_model=1.0, nickname="", target="all"):
+        """Load LoRA adapter using SGLang Diffusion API."""
+        lora_path = folder_paths.get_full_path("loras", lora_name)
+        assert model is not None
+        bi = model.clone()
+        nickname = nickname if nickname != "" else str('lora' + str(uuid.uuid4()))
+        # set lora in the model
+        bi.patches[nickname] = (lora_path, strength_model, target)
+
+        # prepare input for the SGLang Diffusion API
+        lora_input = {"lora_nickname": [], "lora_path": [], "strength": [], "target": []}
+        for nickname, lora_info in bi.patches.items():
+            lora_input["lora_nickname"].append(nickname)
+            lora_input["lora_path"].append(lora_info[0])
+            lora_input["strength"].append(lora_info[1])
+            lora_input["target"].append(lora_info[2])
+        
+        # call the SGLang Diffusion API
+        model.model.diffusion_model.set_lora(**lora_input)
+        return (model,)
 
 class SGLDUNETLoader:
     def __init__(self):
@@ -646,6 +686,7 @@ NODE_CLASS_MAPPINGS = {
     "SGLDiffusionServerUnsetLora": SGLDiffusionServerUnsetLora,
     "SGLDUNETLoader": SGLDUNETLoader,
     "SGLDOptions": SGLDOptions,
+    "SGLDLoraLoader": SGLDLoraLoader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -656,4 +697,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SGLDiffusionServerUnsetLora": "SGLDiffusion Server Unset LoRA",
     "SGLDUNETLoader": "SGLDiffusion UNET Loader",
     "SGLDOptions": "SGLDiffusion Options",
+    "SGLDLoraLoader": "SGLDiffusion LoRA Loader",
 }

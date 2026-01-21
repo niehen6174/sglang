@@ -23,7 +23,7 @@ except ImportError:
         "Error: sglang.multimodal_gen is not installed. Please install it using 'pip install sglang[diffusion]'"
     )
 
-from ..executors import FluxExecutor, ZImageExecutor
+from ..executors import FluxExecutor, ZImageExecutor, QwenImageExecutor
 from .model_patcher import SGLDModelPatcher
 
 
@@ -39,10 +39,14 @@ class SGLDiffusionGenerator:
         self.pipeline_class_dict = {
             "flux": "ComfyUIFluxPipeline",
             "lumina2": "ComfyUIZImagePipeline",  # zimage
+            "qwen_image": "ComfyUIQwenImagePipeline",
+            "qwen_image_edit": "ComfyUIQwenImageEditPipeline",
         }
         self.executor_class_dict = {
             "flux": FluxExecutor,
             "lumina2": ZImageExecutor,
+            "qwen_image": QwenImageExecutor,
+            "qwen_image_edit": QwenImageExecutor,
         }
 
     def __del__(self):
@@ -199,6 +203,10 @@ class SGLDiffusionGenerator:
         )
         if model_type is None or model_type not in self.pipeline_class_dict:
             raise ValueError(f"Unsupported model type: {model_type}")
+
+        set_model_type = sgld_options.get("model_type", None)
+        if set_model_type is not None and set_model_type in self.pipeline_class_dict:
+            model_type = set_model_type
 
         pipeline_class_name = self.pipeline_class_dict[model_type]
         self.generator = self.init_generator(
