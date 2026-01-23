@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-import re
-from collections.abc import Generator
 from itertools import chain
 from typing import Any
 
@@ -194,7 +192,9 @@ class ComfyUIQwenImagePipelineBase(LoRAPipeline, ComposedPipelineBase):
         server_args.model_paths["transformer"] = os.path.dirname(self.model_path) or "."
         assert server_args.hsdp_shard_dim is not None, "hsdp_shard_dim must be set"
         logger.info(
-            "Loading %s from safetensors file, default_dtype: %s", cls_name, default_dtype
+            "Loading %s from safetensors file, default_dtype: %s",
+            cls_name,
+            default_dtype,
         )
         return dit_config, updated_mapping, model_cls, default_dtype
 
@@ -321,30 +321,34 @@ class ComfyUIQwenImagePipelineBase(LoRAPipeline, ComposedPipelineBase):
 
 class ComfyUIQwenImagePipeline(ComfyUIQwenImagePipelineBase):
     """ComfyUI QwenImage pipeline for text-to-image generation."""
+
     pipeline_name = "ComfyUIQwenImagePipeline"
     zero_cond_t = False
-    
+
     from sglang.multimodal_gen.configs.pipeline_configs.qwen_image import (
         QwenImagePipelineConfig,
     )
     from sglang.multimodal_gen.configs.sample.qwenimage import QwenImageSamplingParams
-    
+
     pipeline_config_cls = QwenImagePipelineConfig
     sampling_params_cls = QwenImageSamplingParams
 
 
 class ComfyUIQwenImageEditPipeline(ComfyUIQwenImagePipelineBase):
     """ComfyUI QwenImage pipeline for image-to-image editing."""
+
     pipeline_name = "ComfyUIQwenImageEditPipeline"
     zero_cond_t = True
-    
+
     from sglang.multimodal_gen.configs.pipeline_configs.qwen_image import (
         QwenImageEditPlusPipelineConfig,
     )
-    from sglang.multimodal_gen.configs.sample.qwenimage import QwenImageEditPlusSamplingParams
-    
+    from sglang.multimodal_gen.configs.sample.qwenimage import (
+        QwenImageEditPlusSamplingParams,
+    )
+
     pipeline_config_cls = QwenImageEditPlusPipelineConfig
     sampling_params_cls = QwenImageEditPlusSamplingParams
 
 
-EntryClass = [ComfyUIQwenImagePipeline, ComfyUIQwenImageEditPipeline] 
+EntryClass = [ComfyUIQwenImagePipeline, ComfyUIQwenImageEditPipeline]
