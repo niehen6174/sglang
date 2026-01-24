@@ -5,7 +5,7 @@ Provides executor classes for different model types.
 
 from .base import SGLDiffusionExecutor
 from .flux import FluxExecutor
-from .qwen_image import QwenImageExecutor, QwenImageEditExecutor
+from .qwen_image import QwenImageEditExecutor, QwenImageExecutor
 from .zimage import ZImageExecutor
 
 __all__ = [

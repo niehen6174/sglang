@@ -796,7 +796,10 @@ class DenoisingStage(PipelineStage):
                 )
                 if gather_dim == 2 and hasattr(batch, "raw_latent_shape"):
                     # Adaptive unpadding for trajectory_tensor
-                    if trajectory_tensor.dim() == 4 and len(batch.raw_latent_shape) == 5:
+                    if (
+                        trajectory_tensor.dim() == 4
+                        and len(batch.raw_latent_shape) == 5
+                    ):
                         # [B, NumSteps, S, D] -> unpad S at index 2
                         orig_s = batch.raw_latent_shape[1]
                     else:
