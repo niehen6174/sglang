@@ -14,13 +14,13 @@ This directory contains tests for each ComfyUI pipeline integration.
 ### Run all tests
 
 ```bash
-pytest python/sglang/multimodal_gen/apps/ComfyUI_SGLDiffusion/test/ -v
+pytest python/sglang/multimodal_gen/apps/ComfyUI_SGLDiffusion/test/ -v -s
 ```
 
 ### Run a specific test file
 
 ```bash
-pytest python/sglang/multimodal_gen/apps/ComfyUI_SGLDiffusion/test/test_zimage_pipeline.py -v
+pytest python/sglang/multimodal_gen/apps/ComfyUI_SGLDiffusion/test/test_zimage_pipeline.py -v -s
 ```
 
 ## Environment Variables

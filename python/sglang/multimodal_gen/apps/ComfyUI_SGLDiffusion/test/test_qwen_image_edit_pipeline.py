@@ -1,7 +1,6 @@
 """Test for ComfyUIQwenImageEditPipeline with pass-through scheduler (I2I/edit mode)."""
 
 import os
-from typing import Dict, Optional
 
 import pytest
 import torch
@@ -11,7 +10,7 @@ from sglang.multimodal_gen.runtime.entrypoints.diffusion_generator import DiffGe
 from sglang.multimodal_gen.runtime.entrypoints.utils import prepare_request
 
 
-def test_comfyui_qwen_image_edit_pipeline_direct() -> Dict[str, Optional[torch.Tensor]]:
+def test_comfyui_qwen_image_edit_pipeline_direct() -> None:
     """Test ComfyUIQwenImageEditPipeline with edit mode (I2I) and custom inputs."""
     model_path = os.environ.get(
         "SGLANG_TEST_QWEN_IMAGE_EDIT_MODEL_PATH",
@@ -114,22 +113,18 @@ def test_comfyui_qwen_image_edit_pipeline_direct() -> Dict[str, Optional[torch.T
     output_batch = generator._send_to_scheduler_and_wait_for_response([req])
     noise_pred = output_batch.noise_pred
 
-    if noise_pred is not None:
-        print(f"✓ Successfully retrieved noise_pred from OutputBatch (Edit Mode)!")
-        print(f"  noise_pred shape: {noise_pred.shape}")
-        print(f"  noise_pred dtype: {noise_pred.dtype}")
-        print(f"  noise_pred device: {noise_pred.device}")
-    else:
-        print("⚠ Warning: noise_pred is None in OutputBatch.")
+    assert noise_pred is not None, "noise_pred should not be None in OutputBatch"
+    assert isinstance(noise_pred, torch.Tensor), "noise_pred should be a torch.Tensor"
+    assert noise_pred.device.type == "cuda", f"noise_pred should be on cuda, got {noise_pred.device}"
+    assert noise_pred.dtype == torch.bfloat16, f"noise_pred should be bfloat16, got {noise_pred.dtype}"
+
+    print(f"✓ Successfully retrieved noise_pred from OutputBatch (Edit Mode)!")
+    print(f"  noise_pred shape: {noise_pred.shape}")
+    print(f"  noise_pred dtype: {noise_pred.dtype}")
+    print(f"  noise_pred device: {noise_pred.device}")
 
     latents = output_batch.output if output_batch.output is not None else req.latents
-
-    return {
-        "noise_pred": noise_pred,
-        "latents": latents,
-        "output": output_batch.output,
-        "output_batch": output_batch,
-    }
+    assert latents is not None, "latents should not be None"
 
 
 if __name__ == "__main__":
