@@ -691,9 +691,16 @@ class DenoisingStage(PipelineStage):
                 batch.noise_pred
             )
             if hasattr(batch, "raw_latent_shape"):
-                orig_s = batch.raw_latent_shape[1]
-                if batch.noise_pred.shape[1] > orig_s:
-                    batch.noise_pred = batch.noise_pred[:, :orig_s, :]
+                if batch.noise_pred.dim() == 4 and len(batch.raw_latent_shape) == 5:
+                    # Case for ZImage-like [C, F, H, W] output and [B, C, F, H, W] latents
+                    orig_f = batch.raw_latent_shape[2]
+                    if batch.noise_pred.shape[1] > orig_f:
+                        batch.noise_pred = batch.noise_pred[:, :orig_f, ...]
+                else:
+                    # Default sequence-based unpadding [B, S, D] or [C, S, D]
+                    orig_s = batch.raw_latent_shape[1]
+                    if batch.noise_pred.shape[1] > orig_s:
+                        batch.noise_pred = batch.noise_pred[:, :orig_s, :]
 
         if trajectory_tensor is not None and trajectory_timesteps_tensor is not None:
             batch.trajectory_timesteps = trajectory_timesteps_tensor.cpu()
@@ -788,7 +795,13 @@ class DenoisingStage(PipelineStage):
                     trajectory_tensor, dim=gather_dim
                 )
                 if gather_dim == 2 and hasattr(batch, "raw_latent_shape"):
-                    orig_s = batch.raw_latent_shape[1]
+                    # Adaptive unpadding for trajectory_tensor
+                    if trajectory_tensor.dim() == 4 and len(batch.raw_latent_shape) == 5:
+                        # [B, NumSteps, S, D] -> unpad S at index 2
+                        orig_s = batch.raw_latent_shape[1]
+                    else:
+                        orig_s = batch.raw_latent_shape[1]
+
                     if trajectory_tensor.shape[2] > orig_s:
                         trajectory_tensor = trajectory_tensor[:, :, :orig_s, :]
         return latents, trajectory_tensor
