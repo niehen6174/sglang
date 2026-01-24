@@ -33,7 +33,7 @@ Environment variables:
 - `SGLANG_TEST_ZIMAGE_MODEL_PATH` - Path to ZImage model (default: `Tongyi-MAI/Z-Image-Turbo`)
 - `SGLANG_TEST_FLUX_MODEL_PATH` - Path to Flux model (default: `black-forest-labs/FLUX.1-dev`)
 - `SGLANG_TEST_QWEN_IMAGE_MODEL_PATH` - Path to QwenImage model (default: `Qwen/Qwen-Image`)
-- `SGLANG_TEST_QWEN_IMAGE_EDIT_MODEL_PATH` - Path to QwenImageEdit model (default: `Qwen/Qwen-Image-Edit`)
+- `SGLANG_TEST_QWEN_IMAGE_EDIT_MODEL_PATH` - Path to QwenImageEdit model (default: `Qwen/Qwen-Image-Edit-2511`)
 
 Examples:
 

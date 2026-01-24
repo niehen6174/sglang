@@ -14,7 +14,7 @@ def test_comfyui_qwen_image_edit_pipeline_direct() -> None:
     """Test ComfyUIQwenImageEditPipeline with edit mode (I2I) and custom inputs."""
     model_path = os.environ.get(
         "SGLANG_TEST_QWEN_IMAGE_EDIT_MODEL_PATH",
-        "Qwen/Qwen-Image-Edit",  # Supports both safetensors file and diffusers format
+        "Qwen/Qwen-Image-Edit-2511",  # Supports both safetensors file and diffusers format
     )
 
     generator = DiffGenerator.from_pretrained(
