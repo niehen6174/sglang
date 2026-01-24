@@ -61,10 +61,6 @@ class SGLDOptions:
                     "STRING",
                     {"default": ""},
                 ),
-                "cache_strategy": (
-                    "STRING",
-                    {"default": "none"},
-                ),
             },
         }
 
@@ -75,6 +71,7 @@ class SGLDOptions:
 
     def create_options(
         self,
+        model_type: str = "auto-detect",
         enable_torch_compile: bool = False,
         num_gpus: int = 1,
         tp_size: int = -1,
@@ -85,7 +82,6 @@ class SGLDOptions:
         dp_degree: int = 1,
         enable_cfg_parallel: bool = False,
         attention_backend: str = "",
-        cache_strategy: str = "none",
     ):
         """
         Build a dictionary of SGLang Diffusion runtime options.
@@ -96,6 +92,7 @@ class SGLDOptions:
         attention_backend = None if attention_backend == "" else attention_backend
 
         options = {
+            "model_type": model_type,
             "enable_torch_compile": enable_torch_compile,
             "num_gpus": num_gpus,
             "tp_size": tp_size,
@@ -106,7 +103,6 @@ class SGLDOptions:
             "dp_degree": dp_degree,
             "enable_cfg_parallel": enable_cfg_parallel,
             "attention_backend": attention_backend,
-            "cache_strategy": cache_strategy,
         }
 
         # Strip None to keep payload clean

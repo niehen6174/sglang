@@ -127,19 +127,21 @@ class QwenImageEditExecutor(QwenImageExecutor):
         height = orig_shape[-2] * 8
         width = orig_shape[-1] * 8
 
-        concat_latents = latents
-        vae_image_sizes = [(orig_shape[-2], orig_shape[-1])]
-        # concat ref latents
-        if ref_latents is not None:
-            pack_ref_latents, orig_ref_shape = self._pack_latents(ref_latents)
-            vae_image_sizes.append((orig_ref_shape[-2], orig_ref_shape[-1]))
-            concat_latents = torch.cat([concat_latents, pack_ref_latents], dim=1)
+        # Prepare vae_image_sizes for the condition image (ref_latents)
+        vae_image_sizes = []
+        pack_ref_latents = None
+
+        # TODO: sgld now don't support multiple condition images, so we only support one condition image for now.
+        if ref_latents is not None and len(ref_latents) > 0:
+            pack_ref_latents, orig_ref_shape = self._pack_latents(ref_latents[0])
+            vae_image_sizes = [(orig_ref_shape[-1], orig_ref_shape[-2])]
 
         sampling_params = SamplingParams.from_user_sampling_params_args(
             self.model_path,
             server_args=self.generator.server_args,
             prompt=" ",
             guidance_scale=1.0,
+            image_path="",
             height=height,
             width=width,
             num_frames=1,
@@ -153,7 +155,8 @@ class QwenImageEditExecutor(QwenImageExecutor):
             sampling_params=sampling_params,
         )
         # Set ComfyUI-specific inputs directly on the Req object
-        req.latents = concat_latents
+        req.latents = latents
+        req.image_latent = pack_ref_latents
         req.timesteps = timestep * 1000.0
         req.vae_image_sizes = vae_image_sizes
         req.prompt_embeds = [context]
