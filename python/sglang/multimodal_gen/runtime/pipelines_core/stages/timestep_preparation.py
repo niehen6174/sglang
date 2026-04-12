@@ -93,6 +93,11 @@ class TimestepPreparationStage(PipelineStage):
             if key == "mu":
                 batch.extra["mu"] = value
 
+        # Allow pipeline config to adjust scheduler before set_timesteps
+        # (e.g. Z-Image needs sigma_min=0.0)
+        if hasattr(server_args.pipeline_config, "prepare_scheduler_before_timesteps"):
+            server_args.pipeline_config.prepare_scheduler_before_timesteps(scheduler)
+
         # Handle custom timesteps or sigmas
         if timesteps is not None and sigmas is not None:
             raise ValueError(

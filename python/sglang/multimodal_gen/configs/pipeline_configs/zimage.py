@@ -174,6 +174,10 @@ class ZImagePipelineConfig(ImagePipelineConfig):
             plan = self._build_zimage_sp_plan(batch)
         return plan
 
+    def prepare_scheduler_before_timesteps(self, scheduler):
+        """Match diffusers: set sigma_min=0.0 before set_timesteps."""
+        scheduler.sigma_min = 0.0
+
     def get_pos_prompt_embeds(self, batch):
         return batch.prompt_embeds
 
