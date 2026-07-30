@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# LTX-2 with split video/audio VAEs plus a dedicated VSR node after video decode.
+#
+# Video decode runs on ``vae_video`` and forwards decoded pixels to ``vsr``,
+# which applies Real-ESRGAN when request height < 512. Audio still fans out to
+# ``vae_audio`` as an independent terminal.
+#
+#   denoiser ──latents──► vae_video ──output──► vsr (terminal, emit output)
+#        └─audio_latents─► vae_audio (terminal, emit audio)
+#
+#   sglang serve --disagg-role server --disagg-dag ltx2_dual_vae_vsr.yaml ...
+#   sglang serve --disagg-dag ltx2_dual_vae_vsr.yaml --dag-node vsr ...
+
+source: encoder
+max_inflight: 8
+
+roles:
+  - name: encoder
+    stages:
+      - InputValidationStage
+      - TextEncodingStage
+      - LTX2TextConnectorStage
+      - LTX2SigmaPreparationStage
+      - TimestepPreparationStage
+      - LTX2AVLatentPreparationStage
+      - LTX2ImageEncodingStage
+    modules: [text_encoder, tokenizer, connectors, vae, audio_vae]
+
+  - name: denoiser
+    stages: [LTX2AVDenoisingStage]
+    modules: [transformer, vae, audio_vae]
+
+  - name: vae_video
+    stages: [LTX2VideoDecodingStage]
+    modules: [vae]
+
+  - name: vsr
+    stages: [LTX2VSRStage]
+    modules: []
+    terminal: true
+    emit: [output]
+
+  - name: vae_audio
+    stages: [LTX2AudioDecodingStage]
+    modules: [audio_vae, vocoder]
+    terminal: true
+    emit: [audio, audio_sample_rate]
+
+pools:
+  - role: encoder
+    urls: ["tcp://0.0.0.0:35010"]
+    capacity: 4
+
+  - role: denoiser
+    urls: ["tcp://0.0.0.0:35020"]
+    capacity: 2
+
+  - role: vae_video
+    urls: ["tcp://0.0.0.0:35030"]
+    capacity: 4
+
+  - role: vsr
+    urls: ["tcp://0.0.0.0:35050"]
+    capacity: 8
+
+  - role: vae_audio
+    urls: ["tcp://0.0.0.0:35040"]
+    capacity: 8
+
+routes:
+  - {src: encoder, dst: denoiser}
+  - {src: denoiser, dst: vae_video, fields: [latents]}
+  - {src: vae_video, dst: vsr, fields: [output, height, width]}
+  - {src: denoiser, dst: vae_audio, when: "generate_audio", fields: [audio_latents]}

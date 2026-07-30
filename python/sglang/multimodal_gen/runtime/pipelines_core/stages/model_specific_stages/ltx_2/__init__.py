@@ -25,6 +25,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.l
     LTX2LoRASwitchStage,
     LTX2UpsampleStage,
 )
+from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.ltx_2.vsr import (
+    LTX2VSRStage,
+)
 
 __all__ = [
     "LTX2AudioDecodingStage",
@@ -38,4 +41,5 @@ __all__ = [
     "LTX2RefinementStage",
     "LTX2TextConnectorStage",
     "LTX2UpsampleStage",
+    "LTX2VSRStage",
 ]

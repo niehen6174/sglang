@@ -49,6 +49,7 @@ from sglang.multimodal_gen.runtime.disaggregation.transport.protocol import (
     is_transfer_message,
 )
 from sglang.multimodal_gen.runtime.pipelines_core import Req
+from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
 from sglang.multimodal_gen.runtime.pipelines_core.diffusion_scheduler_utils import (
     clone_scheduler_runtime,
 )
@@ -342,6 +343,38 @@ def extract_transfer_fields(req) -> tuple[dict, dict]:
             logger.debug("Failed to export trace state: %s", e)
 
     return tensor_fields, scalar_fields
+
+
+def _coerce_transfer_tensor(value: Any) -> torch.Tensor:
+    from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
+
+    device = get_local_torch_device()
+    if isinstance(value, torch.Tensor):
+        return value.to(device, non_blocking=True)
+    if isinstance(value, np.ndarray):
+        return torch.from_numpy(value).to(device, non_blocking=True)
+    if isinstance(value, list) and value and isinstance(value[0], np.ndarray):
+        return torch.from_numpy(np.stack(value)).to(device, non_blocking=True)
+    raise TypeError(f"Unsupported transfer tensor type: {type(value)}")
+
+
+def extract_relay_transfer_fields(
+    input_req: Req, result: Req | OutputBatch
+) -> tuple[dict, dict]:
+    """Split a non-terminal DAG node's output for the transfer pool.
+
+    Denoising stages return an updated ``Req``; decoding stages return an
+    ``OutputBatch`` whose ``output`` pixels must be forwarded explicitly.
+    """
+    if isinstance(result, OutputBatch):
+        if result.error:
+            raise RuntimeError(result.error)
+        tensor_fields: dict[str, Any] = {}
+        if result.output is not None:
+            tensor_fields["output"] = _coerce_transfer_tensor(result.output)
+        _, scalar_fields = extract_transfer_fields(input_req)
+        return tensor_fields, scalar_fields
+    return extract_transfer_fields(result)
 
 
 # ---------------------------------------------------------------------------
@@ -1510,17 +1543,35 @@ class SchedulerDisaggMixin:
         Note: Scheduler timestep init is done before this call so it can
         overlap with tensor loading.
         """
+        req.save_output = False
+        req.return_file_paths_only = False
         start_time = time.monotonic()
         with self._disagg_trace_dispatch(req):
             result = self.worker.execute_forward([req], return_req=True)
         duration_s = time.monotonic() - start_time
 
-        if not isinstance(result, Req):
+        if isinstance(result, OutputBatch):
+            if result.error:
+                self._send_node_error(request_id, result.error)
+                return
+            try:
+                tensor_fields, scalar_fields = extract_relay_transfer_fields(
+                    req, result
+                )
+            except RuntimeError as exc:
+                self._send_node_error(request_id, str(exc))
+                return
+        elif isinstance(result, Req):
+            tensor_fields, scalar_fields = extract_transfer_fields(result)
+        else:
             error_msg = getattr(result, "error", f"{node_name} error")
             self._send_node_error(request_id, str(error_msg))
             return
 
-        tensor_fields, scalar_fields = extract_transfer_fields(result)
+        if not tensor_fields and not scalar_fields:
+            self._send_node_error(request_id, f"{node_name} produced no transfer fields")
+            return
+
         if self._disagg_stage_and_notify(request_id, tensor_fields, scalar_fields):
             logger.debug(
                 "Transfer %s: processed %s in %.2f s, staged for downstream",

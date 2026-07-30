@@ -49,6 +49,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.l
     LTX2TextConnectorStage,
     LTX2UpsampleStage,
     LTX2VideoDecodingStage,
+    LTX2VSRStage,
 )
 from sglang.multimodal_gen.runtime.server_args import (
     LTX2_TWO_STAGE_DEVICE_MODE_CHOICES,
@@ -273,6 +274,8 @@ def _add_ltx2_decoding_stage(pipeline: ComposedPipelineBase):
                 pipeline=pipeline,
             )
         )
+        if pipeline.dag_claims(LTX2VSRStage.__name__):
+            pipeline.add_stage(LTX2VSRStage())
         return
 
     pipeline.add_stage(
