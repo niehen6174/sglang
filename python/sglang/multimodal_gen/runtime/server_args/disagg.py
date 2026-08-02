@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import ClassVar, Literal
 
 from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
@@ -11,6 +12,8 @@ from sglang.multimodal_gen.runtime.utils.common import (
     parse_tcp_host_port,
 )
 from sglang.multimodal_gen.utils import FlexibleArgumentParser
+
+logger = logging.getLogger(__name__)
 
 
 class DisaggServerArgsMixin:
@@ -60,6 +63,14 @@ class DisaggServerArgsMixin:
 
     def derive_pool_work_endpoint(self) -> str:
         return format_tcp_endpoint("0.0.0.0", self.scheduler_port, "pool_work_endpoint")
+
+    def derive_pool_work_advertised_endpoint(self) -> str:
+        host = self.disagg_p2p_hostname or self.host or "127.0.0.1"
+        if host == "0.0.0.0":
+            host = "127.0.0.1"
+        return format_tcp_endpoint(
+            host, self.scheduler_port, "pool_work_advertised_endpoint"
+        )
 
     def derive_pool_control_endpoint(self) -> str:
         return format_tcp_endpoint(
@@ -115,6 +126,45 @@ class DisaggServerArgsMixin:
             return cached
 
         spec = DagSpec.load(self.disagg_dag)
+        role = getattr(self.disagg_role, "value", self.disagg_role)
+        etcd_pools = [pool for pool in spec.pools if pool.discovery == "etcd"]
+        if etcd_pools and role == RoleType.SERVER.value and not self.dag_validate:
+            if not self.disagg_etcd_endpoint:
+                raise ValueError(
+                    "--disagg-etcd-endpoint is required when a DAG pool uses "
+                    "discovery: etcd"
+                )
+            from sglang.multimodal_gen.runtime.disaggregation.membership import (
+                EtcdHttpClient,
+                wait_for_workers,
+            )
+
+            client = EtcdHttpClient(self.disagg_etcd_endpoint)
+            for pool in etcd_pools:
+                logger.info(
+                    "Waiting for %d etcd worker(s) for DAG node %s",
+                    pool.min_instances,
+                    pool.role,
+                )
+                records = wait_for_workers(
+                    client,
+                    self.disagg_etcd_cluster_id,
+                    pool.role,
+                    pool.min_instances,
+                    self.disagg_etcd_startup_timeout,
+                )
+                pool.urls = [record.work_endpoint for record in records]
+                if len(set(pool.urls)) != len(pool.urls):
+                    raise ValueError(
+                        f"etcd returned duplicate work endpoints for pool "
+                        f"{pool.role!r}: {pool.urls}"
+                    )
+                logger.info(
+                    "Resolved DAG node %s to %d worker(s): %s",
+                    pool.role,
+                    len(pool.urls),
+                    pool.urls,
+                )
         for index, role in enumerate(spec.roles):
             pool = spec.get_pool(role.name)
             if pool is not None and not pool.result_endpoint:
@@ -256,6 +306,33 @@ class DisaggServerArgsMixin:
             type=str,
             default=cls.disagg_server_addr,
             help="DiffusionServer head node address for per-role launch mode.",
+        )
+        parser.add_argument(
+            "--disagg-etcd-endpoint",
+            type=str,
+            default=cls.disagg_etcd_endpoint,
+            help=(
+                "etcd v3 HTTP endpoint used by DAG pools with discovery=etcd. "
+                "Static pools do not contact etcd."
+            ),
+        )
+        parser.add_argument(
+            "--disagg-etcd-cluster-id",
+            type=str,
+            default=cls.disagg_etcd_cluster_id,
+            help="Namespace that isolates one diffusion deployment in etcd.",
+        )
+        parser.add_argument(
+            "--disagg-etcd-lease-ttl",
+            type=int,
+            default=cls.disagg_etcd_lease_ttl,
+            help="Worker membership lease TTL in seconds.",
+        )
+        parser.add_argument(
+            "--disagg-etcd-startup-timeout",
+            type=float,
+            default=cls.disagg_etcd_startup_timeout,
+            help="Seconds the head waits for each etcd-discovered pool.",
         )
         parser.add_argument(
             "--encoder-urls",

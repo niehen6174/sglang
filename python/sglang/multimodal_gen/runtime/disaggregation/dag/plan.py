@@ -478,7 +478,17 @@ class ExecutionPlan:
     def _validate_pools(nodes: dict[str, CompiledNode]) -> list[str]:
         errors: list[str] = []
         for node in nodes.values():
-            if node.num_instances < 1:
+            if node.pool.discovery not in ("static", "etcd"):
+                errors.append(
+                    f"Node '{node.name}' has unsupported discovery mode "
+                    f"{node.pool.discovery!r}; expected 'static' or 'etcd'"
+                )
+            if node.pool.min_instances < 1:
+                errors.append(
+                    f"Node '{node.name}' has min_instances "
+                    f"{node.pool.min_instances}; must be at least 1"
+                )
+            if node.num_instances < 1 and node.pool.discovery == "static":
                 errors.append(
                     f"Node '{node.name}' has no pool instances; declare at "
                     f"least one work endpoint under pools[].urls"

@@ -398,6 +398,10 @@ class ServerArgs(DisaggServerArgsMixin):
     disagg_p2p_hostname: str = "127.0.0.1"
     disagg_ib_device: str | None = None
     disagg_server_addr: str | None = None
+    disagg_etcd_endpoint: str | None = None
+    disagg_etcd_cluster_id: str = "default"
+    disagg_etcd_lease_ttl: int = 30
+    disagg_etcd_startup_timeout: float = 120.0
     encoder_urls: str | None = None
     denoiser_urls: str | None = None
     decoder_urls: str | None = None
@@ -409,6 +413,7 @@ class ServerArgs(DisaggServerArgsMixin):
     decoder_sp: int | None = None
     decoder_tp: int | None = None
     pool_work_endpoint: str | None = None
+    pool_work_advertised_endpoint: str | None = None
     pool_result_endpoint: str | None = None
     pool_control_endpoint: str | None = None
     pool_control_advertised_endpoint: str | None = None

@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Minimal etcd-discovered variant of zimage_linear.yaml. Workers register only
+# after their model ranks and transfer sockets are ready. The head waits for
+# min_instances, takes one snapshot, then runs an immutable ExecutionPlan.
+
+source: encoder
+
+roles:
+  - name: encoder
+    stages:
+      - InputValidationStage
+      - TextEncodingStage
+      - LatentPreparationStage
+      - TimestepPreparationStage
+    modules: [text_encoder, tokenizer]
+
+  - name: denoiser
+    stages: [denoising_stage]
+    modules: [transformer]
+
+  - name: decoder
+    stages: [decoding_stage]
+    modules: [vae]
+    terminal: true
+    emit: [output]
+
+pools:
+  - role: encoder
+    discovery: etcd
+    min_instances: 1
+    capacity: 4
+  - role: denoiser
+    discovery: etcd
+    min_instances: 1
+    capacity: 2
+  - role: decoder
+    discovery: etcd
+    min_instances: 1
+    capacity: 4
+
+routes:
+  - {src: encoder, dst: denoiser}
+  - {src: denoiser, dst: decoder}

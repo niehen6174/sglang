@@ -571,9 +571,9 @@ def parse_url_string(url_str: str) -> list[str]:
 def launch_dag_server(server_args: ServerArgs):
     """Launch the orchestrator for a custom DAG topology (``--disagg-dag``).
 
-    Node work endpoints come from the topology's pool URLs; result endpoints
-    follow the same ``base_port + index + 1`` convention the three fixed roles
-    use, so a DAG deployment needs no extra port bookkeeping.
+    Node work endpoints come from static pool URLs or one etcd snapshot;
+    result endpoints follow the same ``base_port + index + 1`` convention the
+    three fixed roles use, so a DAG deployment needs no extra port bookkeeping.
     """
     configure_logger(server_args)
 
@@ -714,6 +714,8 @@ def launch_disagg_role(server_args: ServerArgs):
 
     # Derive endpoints
     work_endpoint = server_args.derive_pool_work_endpoint()
+    work_advertised_endpoint = work_endpoint
+    use_etcd_membership = False
     if plan is not None:
         if not node_name or not plan.has_node(node_name):
             raise ValueError(
@@ -721,6 +723,16 @@ def launch_disagg_role(server_args: ServerArgs):
                 f"known nodes: {plan.node_names}"
             )
         result_endpoint = plan.node(node_name).pool.result_endpoint
+        if plan.node(node_name).pool.discovery == "etcd":
+            use_etcd_membership = True
+            if not server_args.disagg_etcd_endpoint:
+                raise ValueError(
+                    "--disagg-etcd-endpoint is required when this DAG pool uses "
+                    "discovery: etcd"
+                )
+            work_advertised_endpoint = (
+                server_args.derive_pool_work_advertised_endpoint()
+            )
     else:
         result_endpoint = server_args.derive_pool_result_endpoint()
 
@@ -764,6 +776,7 @@ def launch_disagg_role(server_args: ServerArgs):
         "disagg_role": role_type,
         "disagg_mode": True,
         "pool_work_endpoint": work_endpoint,
+        "pool_work_advertised_endpoint": work_advertised_endpoint,
         "pool_result_endpoint": result_endpoint,
         "warmup": is_source,
         "server_warmup": False,
@@ -830,12 +843,35 @@ def launch_disagg_role(server_args: ServerArgs):
     )
 
     # Block until interrupted
+    registrar = None
     try:
+        if use_etcd_membership:
+            from sglang.multimodal_gen.runtime.disaggregation.membership import (
+                EtcdHttpClient,
+                WorkerRecord,
+                WorkerRegistrar,
+            )
+
+            record = WorkerRecord.ready(
+                instance_id=server_args.disagg_instance_id,
+                node=node_name,
+                work_endpoint=work_advertised_endpoint,
+                capacity=plan.node(node_name).capacity,
+            )
+            registrar = WorkerRegistrar(
+                EtcdHttpClient(server_args.disagg_etcd_endpoint),
+                server_args.disagg_etcd_cluster_id,
+                record,
+                ttl_s=server_args.disagg_etcd_lease_ttl,
+            )
+            registrar.start()
         for p in processes:
             p.join()
     except KeyboardInterrupt:
         logger.info("Role %s shutting down.", role_type.value)
     finally:
+        if registrar is not None:
+            registrar.stop()
         shutdown_scheduler_processes(role_args, processes, request_shutdown=False)
 
 

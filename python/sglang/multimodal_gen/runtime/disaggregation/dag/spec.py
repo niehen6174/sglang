@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 JoinPolicy = Literal["all", "any"]
+DiscoveryMode = Literal["static", "etcd"]
 
 
 @dataclass
@@ -100,6 +101,8 @@ class PoolSpec:
 
     ``urls`` are the per-instance work endpoints, in the same order the
     orchestrator builds its PUSH sockets; instance indices refer to this list.
+    With ``discovery="etcd"``, workers may omit ``urls`` and the head fills
+    them once at startup after at least ``min_instances`` are READY.
     """
 
     role: str
@@ -109,6 +112,8 @@ class PoolSpec:
     dispatch_policy: str = "round_robin"
     prealloc_slots: int = 2
     result_endpoint: str | None = None
+    discovery: DiscoveryMode = "static"
+    min_instances: int = 1
 
     @property
     def num_instances(self) -> int:
@@ -124,6 +129,8 @@ class PoolSpec:
             dispatch_policy=data.get("dispatch_policy", "round_robin"),
             prealloc_slots=int(data.get("prealloc_slots", 2)),
             result_endpoint=data.get("result_endpoint"),
+            discovery=data.get("discovery", "static"),
+            min_instances=int(data.get("min_instances", 1)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -138,6 +145,10 @@ class PoolSpec:
             out["prealloc_slots"] = self.prealloc_slots
         if self.result_endpoint is not None:
             out["result_endpoint"] = self.result_endpoint
+        if self.discovery != "static":
+            out["discovery"] = self.discovery
+        if self.min_instances != 1:
+            out["min_instances"] = self.min_instances
         return out
 
 

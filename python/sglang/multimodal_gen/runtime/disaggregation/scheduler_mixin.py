@@ -578,7 +578,10 @@ class SchedulerDisaggMixin:
             session_id=self._transfer_manager.session_id,
             pool_ptr=self._transfer_manager.pool_data_ptr,
             pool_size=self._transfer_manager.pool_size,
-            work_endpoint=sa.pool_work_endpoint,
+            work_endpoint=(
+                getattr(sa, "pool_work_advertised_endpoint", None)
+                or sa.pool_work_endpoint
+            ),
             preallocated_slots=preallocated_slot_info,
         )
         self._pool_result_push.send_multipart(encode_transfer_msg(register_msg))
