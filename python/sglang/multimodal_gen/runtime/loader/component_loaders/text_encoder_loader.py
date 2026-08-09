@@ -194,6 +194,16 @@ class TextEncoderLoader(ComponentLoader):
         #     model_name_or_path, revision) or model_name_or_path)
 
         is_local = os.path.isdir(model_name_or_path)
+        if (
+            not is_local
+            and os.path.isfile(model_name_or_path)
+            and model_name_or_path.endswith(".safetensors")
+        ):
+            return (
+                os.path.dirname(model_name_or_path) or ".",
+                [model_name_or_path],
+                True,
+            )
         assert is_local, "Model path must be a local directory"
 
         use_safetensors = False
@@ -362,13 +372,20 @@ class TextEncoderLoader(ComponentLoader):
         encoder_dtype = server_args.pipeline_config.text_encoder_precisions[
             encoder_index
         ]
+        weights_path = server_args.component_weights_paths.get(
+            component_name, component_model_path
+        )
+        # Comfy TE weights are dequantized during load_weights; apply NVFP4
+        # pre_quant_scale smoothing on o_proj/down_proj at forward time.
+        quant_config = None
         # TODO(will): add support for other dtypes
         return self.load_model(
-            component_model_path,
+            weights_path,
             encoder_config,
             server_args,
             encoder_dtype,
             cpu_offload_flag=cpu_offload_flag,
+            quant_config=quant_config,
         )
 
     @staticmethod
@@ -393,6 +410,16 @@ class TextEncoderLoader(ComponentLoader):
             )
         return suffix_num - 1
 
+    @staticmethod
+    def _iter_local_safetensors(
+        safetensors_path: str,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        from safetensors import safe_open
+
+        with safe_open(safetensors_path, framework="pt", device="cpu") as handle:
+            tensors = [(key, handle.get_tensor(key)) for key in handle.keys()]
+        yield from tensors
+
     def load_model(
         self,
         model_path: str,
@@ -400,6 +427,7 @@ class TextEncoderLoader(ComponentLoader):
         server_args: ServerArgs,
         dtype: str = "fp16",
         cpu_offload_flag: bool | None = None,
+        quant_config=None,
     ):
         # Determine CPU offload behavior and target device
 
@@ -445,27 +473,51 @@ class TextEncoderLoader(ComponentLoader):
 
         # patch tp group with folding group to achieve TP among folding group
         with fold_ctx, set_default_torch_dtype(PRECISION_TO_TYPE[dtype]):
-            with model_device, skip_init_modules():
-                architectures = getattr(model_config, "architectures", [])
-                model_cls, _ = ModelRegistry.resolve_model_cls(architectures)
-                enable_image_understanding = (
-                    True
-                    if isinstance(
-                        server_args.pipeline_config, QwenImageEditPipelineConfig
+            if hasattr(torch, "set_default_device"):
+                torch.set_default_device(str(model_device))
+            try:
+                with model_device, skip_init_modules():
+                    architectures = getattr(model_config, "architectures", [])
+                    model_cls, _ = ModelRegistry.resolve_model_cls(architectures)
+                    enable_image_understanding = (
+                        True
+                        if isinstance(
+                            server_args.pipeline_config, QwenImageEditPipelineConfig
+                        )
+                        else False
                     )
-                    else False
-                )
-                model_config.enable_image_understanding = enable_image_understanding
-                model = model_cls(model_config)
+                    model_config.enable_image_understanding = enable_image_understanding
+                    model_init_kwargs = {}
+                    if quant_config is not None:
+                        model_init_kwargs["quant_config"] = quant_config
+                    model = model_cls(model_config, **model_init_kwargs)
+            finally:
+                if hasattr(torch, "set_default_device"):
+                    torch.set_default_device(None)
+
+            for name, param in list(model.named_parameters()):
+                if param.device.type == "meta":
+                    param.data = torch.empty(
+                        param.shape,
+                        dtype=param.dtype,
+                        device=model_device,
+                    )
 
             weights_to_load = {name for name, _ in model.named_parameters()}
-            loaded_weights = model.load_weights(
-                self._get_all_weights(
+            if os.path.isfile(model_path) and model_path.endswith(".safetensors"):
+                weights_iterator = self._iter_local_safetensors(model_path)
+            else:
+                weights_iterator = self._get_all_weights(
                     model,
                     model_path,
                     to_cpu=should_offload,
                 )
+            from sglang.multimodal_gen.runtime.layers.quantization.comfy_quant_kernel_adapter import (
+                ensure_comfy_kitchen_nvfp4_lut_materialized,
             )
+
+            ensure_comfy_kitchen_nvfp4_lut_materialized()
+            loaded_weights = model.load_weights(weights_iterator)
 
             if should_offload:
                 # Disable FSDP for MPS as it's not compatible
@@ -474,7 +526,9 @@ class TextEncoderLoader(ComponentLoader):
                         "Disabling FSDP sharding for MPS platform as it's not compatible"
                     )
                     model = model.to(local_torch_device)
-                elif fsdp_cpu_offload:
+                elif fsdp_cpu_offload and not (
+                    os.path.isfile(model_path) and model_path.endswith(".safetensors")
+                ):
                     mesh = init_device_mesh(
                         current_platform.device_type,
                         mesh_shape=(1, dist.get_world_size()),
@@ -490,9 +544,21 @@ class TextEncoderLoader(ComponentLoader):
                         pin_cpu_memory=server_args.pin_cpu_memory,
                     )
                 else:
+                    if fsdp_cpu_offload and os.path.isfile(model_path):
+                        logger.info(
+                            "Keeping %s on CPU without FSDP for single-file checkpoint load",
+                            type(model).__name__,
+                        )
                     model = model.to("cpu")
             else:
                 model = model.to(local_torch_device)
+
+            if should_offload:
+                model._force_cpu_forward = True
+                inner_module = getattr(model, "module", None)
+                if inner_module is not None:
+                    inner_module._force_cpu_forward = True
+
             # We only enable strict check for non-quantized models
             # that have loaded weights tracking currently.
             # if loaded_weights is not None:

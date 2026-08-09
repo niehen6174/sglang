@@ -47,6 +47,71 @@ def _backfill_ltx2_audio_vae_latent_stats(
         loaded["latents_std"] = loaded[std_key]
 
 
+def _strip_minimax_h3_vae_latent_stats(
+    loaded: dict[str, torch.Tensor],
+    component_name: str,
+    vae_config,
+) -> None:
+    """Drop checkpoint-only latent stats for native MiniMax H3 VAE loads."""
+
+    if component_name not in ("video_vae", "audio_vae"):
+        return
+    arch_config = getattr(vae_config, "arch_config", None)
+    if arch_config is None:
+        return
+
+    for field_name in ("latents_mean", "latents_std"):
+        tensor = loaded.pop(field_name, None)
+        if tensor is None:
+            continue
+        config_values = getattr(arch_config, field_name, None)
+        if not config_values:
+            continue
+        if len(config_values) != int(tensor.numel()):
+            logger.warning(
+                "MiniMax H3 %s checkpoint %s length %d does not match config %d; "
+                "using config.json values",
+                component_name,
+                field_name,
+                int(tensor.numel()),
+                len(config_values),
+            )
+            continue
+        checkpoint_values = tensor.detach().cpu().tolist()
+        if any(
+            abs(float(checkpoint) - float(config)) > 1e-3
+            for checkpoint, config in zip(checkpoint_values, config_values)
+        ):
+            logger.warning(
+                "MiniMax H3 %s checkpoint %s differs from config.json; "
+                "using config.json values",
+                component_name,
+                field_name,
+            )
+
+
+def _remap_fused_weights_to_weight_norm_parametrizations(
+    loaded: dict[str, torch.Tensor],
+    model: nn.Module,
+) -> None:
+    """Map fused ``*.weight`` tensors into PyTorch weight-norm parametrization keys."""
+
+    expected = set(model.state_dict().keys())
+    for key in list(loaded.keys()):
+        if not key.endswith(".weight"):
+            continue
+        prefix = key[: -len(".weight")]
+        scale_key = f"{prefix}.parametrizations.weight.original0"
+        direction_key = f"{prefix}.parametrizations.weight.original1"
+        if scale_key not in expected or direction_key not in expected:
+            continue
+        weight = loaded.pop(key)
+        norm_dims = tuple(range(1, weight.dim()))
+        scale = torch.linalg.vector_norm(weight, dim=norm_dims, keepdim=True)
+        loaded[scale_key] = scale
+        loaded[direction_key] = weight
+
+
 def _convert_conv3d_weights_to_channels_last_3d(module: nn.Module) -> int:
     """
     Convert Conv3d weights to channels_last_3d (NDHWC) memory format.
@@ -178,13 +243,17 @@ class VAELoader(ComponentLoader):
             vae_cls, _ = ModelRegistry.resolve_model_cls(class_name)
             vae = vae_cls(vae_config).to(target_device)
 
-        safetensors_list = _list_safetensors_files(component_model_path)
-        safetensors_list = server_args.pipeline_config.select_vae_weight_files(
-            safetensors_list=safetensors_list,
-            component_model_path=component_model_path,
-            component_name=component_name,
-            vae_precision=vae_precision,
-        )
+        weights_override = server_args.component_weights_paths.get(component_name)
+        if weights_override is not None:
+            safetensors_list = [weights_override]
+        else:
+            safetensors_list = _list_safetensors_files(component_model_path)
+            safetensors_list = server_args.pipeline_config.select_vae_weight_files(
+                safetensors_list=safetensors_list,
+                component_model_path=component_model_path,
+                component_name=component_name,
+                vae_precision=vae_precision,
+            )
 
         assert (
             len(safetensors_list) >= 1
@@ -193,6 +262,9 @@ class VAELoader(ComponentLoader):
         for sf_path in safetensors_list:
             loaded.update(safetensors_load_file(sf_path))
         _backfill_ltx2_audio_vae_latent_stats(loaded, component_name)
+        _strip_minimax_h3_vae_latent_stats(loaded, component_name, vae_config)
+        if component_name == "audio_vae":
+            _remap_fused_weights_to_weight_norm_parametrizations(loaded, vae)
         strict_load = native_only
         vae.load_state_dict(loaded, strict=strict_load)
 

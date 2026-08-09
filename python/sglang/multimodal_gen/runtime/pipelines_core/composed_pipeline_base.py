@@ -347,12 +347,24 @@ class ComposedPipelineBase(ABC):
     def _resolve_component_path(
         self, server_args: ServerArgs, module_name: str, load_module_name: str
     ) -> str:
+        default_component_path = os.path.join(self.model_path, load_module_name)
         override_path = server_args.component_paths.get(module_name)
         if override_path is not None:
             # overridden with args like --vae-path
             component_model_path = maybe_download_model(override_path)
+            if os.path.isfile(component_model_path) and component_model_path.endswith(
+                ".safetensors"
+            ):
+                server_args.component_weights_paths[module_name] = component_model_path
+                component_model_path = default_component_path
+                logger.info(
+                    "Component %s config from %s, weights from %s",
+                    module_name,
+                    component_model_path,
+                    server_args.component_weights_paths[module_name],
+                )
         else:
-            component_model_path = os.path.join(self.model_path, load_module_name)
+            component_model_path = default_component_path
 
         logger.debug("Resolved component path: %s", component_model_path)
         return component_model_path

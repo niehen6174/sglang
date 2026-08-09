@@ -2,12 +2,14 @@
 """MiniMax H3 cfg-distilled full denoise loop.
 
 Per step, the positive presentation is forwarded exactly once. Video and audio
-target rows chain through the Euler-eta0 update while visual and audio condition
-rows stay pinned to their noised step-0 anchors.
+target rows chain through Comfy-compatible ``res_multistep`` (``eta=0``) while
+visual and audio condition rows stay pinned to their noised step-0 anchors.
 """
 
 from __future__ import annotations
 
+import math
+import os
 from contextlib import AbstractContextManager, nullcontext
 from typing import Any, Callable
 
@@ -24,6 +26,90 @@ MINIMAX_H3_AUDIO_REF_COND_TIMESTEP = 1.0
 # (24 * 1 * 2 * 2 = 96); audio rows carry the 32-dim audio latent.
 MINIMAX_H3_VIDEO_ROW_WIDTH = 96
 MINIMAX_H3_AUDIO_ROW_WIDTH = 32
+
+
+def _flow_log_sigma(sigma: float) -> float:
+    if sigma <= 0.0:
+        return float("inf")
+    return -math.log(sigma)
+
+
+def _flow_phi1(t: float) -> float:
+    if abs(t) < 1e-12:
+        return 1.0
+    return math.expm1(t) / t
+
+
+def _flow_phi2(t: float) -> float:
+    if abs(t) < 1e-12:
+        return 0.5
+    return (_flow_phi1(t) - 1.0) / t
+
+
+@torch.inference_mode()
+def _minimax_h3_compute_denoised_rows_(
+    state: torch.Tensor,
+    velocity: torch.Tensor,
+    *,
+    sigma_curr: float,
+    out: torch.Tensor,
+) -> None:
+    """Patchified-row denoised prediction aligned with Comfy ``calculate_denoised``.
+
+    Comfy returns ``-unpatchify(v)`` from the DiT wrapper; in the patchified
+    row space the logits therefore enter as ``denoised = x - sigma * logits``.
+    """
+    torch.mul(velocity, float(sigma_curr), out=out)
+    torch.sub(state, out, out=out)
+
+
+@torch.inference_mode()
+def _minimax_h3_res_multistep_target_rows_(
+    state: torch.Tensor,
+    denoised: torch.Tensor,
+    *,
+    sigma_curr: float,
+    sigma_next: float,
+    sigma_prev: float | None,
+    old_denoised: torch.Tensor | None,
+    old_sigma_down: float | None,
+    derivative_scratch: torch.Tensor,
+) -> tuple[torch.Tensor, float]:
+    """In-place ``res_multistep`` update (``eta=0``) on one target-row block."""
+    sigma_down = float(sigma_next)
+    if sigma_down == 0.0 or old_denoised is None:
+        inv_sigma = 0.0 if float(sigma_curr) == 0.0 else 1.0 / float(sigma_curr)
+        torch.sub(state, denoised, out=derivative_scratch)
+        derivative_scratch.mul_(inv_sigma)
+        derivative_scratch.mul_(sigma_down - float(sigma_curr))
+        state.add_(derivative_scratch)
+    else:
+        if sigma_prev is None:
+            raise ValueError("sigma_prev is required for multistep updates")
+        t = _flow_log_sigma(float(sigma_curr))
+        t_old = _flow_log_sigma(float(old_sigma_down))
+        t_next = _flow_log_sigma(sigma_down)
+        t_prev = _flow_log_sigma(float(sigma_prev))
+        h = t_next - t
+        if abs(h) < 1e-12:
+            return denoised.clone(), sigma_down
+        c2 = (t_prev - t_old) / h
+        phi1_val = _flow_phi1(-h)
+        phi2_val = _flow_phi2(-h)
+        b1 = phi1_val - phi2_val / c2 if math.isfinite(c2) and c2 != 0.0 else 0.0
+        b2 = phi2_val / c2 if math.isfinite(c2) and c2 != 0.0 else 0.0
+        if not math.isfinite(b1):
+            b1 = 0.0
+        if not math.isfinite(b2):
+            b2 = 0.0
+        scale = math.exp(-h)
+        state.mul_(scale)
+        torch.mul(denoised, h * b1, out=derivative_scratch)
+        state.add_(derivative_scratch)
+        if b2 != 0.0:
+            derivative_scratch.copy_(old_denoised).mul_(h * b2)
+            state.add_(derivative_scratch)
+    return denoised.clone(), sigma_down
 
 
 @torch.inference_mode()
@@ -364,7 +450,8 @@ def minimax_h3_denoise_loop(
     keyframe_cond_rows: torch.Tensor | None,
     audio_ref_rows: torch.Tensor | None = None,
     sigmas_video: list[float],
-    sigmas_audio: list[float],
+    sigma_shift_video: float,
+    sigma_shift_audio: float,
     device: torch.device,
     imgvid_cond_noise_aug_for_inference: float = MINIMAX_H3_IMGVID_COND_TIMESTEP,
     audio_cond_noise_aug_for_inference: float = MINIMAX_H3_AUDIO_REF_COND_TIMESTEP,
@@ -381,10 +468,14 @@ def minimax_h3_denoise_loop(
     receives the zero-based loop step; the default keeps this helper
     independently testable with a plain callable.
     """
-    if len(sigmas_video) != len(sigmas_audio):
-        raise ValueError("video/audio sigma schedules must have equal length")
     if len(sigmas_video) < 2:
         raise ValueError("sigma schedules need at least 2 entries")
+    if float(sigma_shift_video) <= 0.0 or float(sigma_shift_audio) <= 0.0:
+        raise ValueError("sigma shift scales must be > 0")
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.time_request import (
+        minimax_h3_time_shift_sigma,
+        minimax_h3_time_shift_slope,
+    )
     n_cond = positive.video_target_start
     if keyframe_cond_rows is None:
         if n_cond != 0:
@@ -437,34 +528,44 @@ def minimax_h3_denoise_loop(
     video_target_slice = positive.video_target_slice
     audio_target_slice = positive.audio_target_slice
     video_timesteps = [1.0 - sigma for sigma in sigmas_video[:-1]]
-    audio_timesteps = [1.0 - sigma for sigma in sigmas_audio[:-1]]
+    audio_timesteps = [
+        1.0
+        - minimax_h3_time_shift_sigma(
+            sigma,
+            from_shift=float(sigma_shift_video),
+            to_shift=float(sigma_shift_audio),
+        )
+        for sigma in sigmas_video[:-1]
+    ]
     # One H2D copy per schedule, preserving the previous Python-float
     # subtraction followed by fp32 conversion.
-    video_step_t = torch.tensor(video_timesteps, dtype=torch.float32, device=device)
-    audio_step_t = torch.tensor(audio_timesteps, dtype=torch.float32, device=device)
     timestep_plan = positive.prepare_timestep_plan(
         video_timesteps=video_timesteps,
         audio_timesteps=audio_timesteps,
         imgvid_cond_noise_aug=float(imgvid_cond_noise_aug_for_inference),
         audio_ref_cond_noise_aug=float(audio_cond_noise_aug_for_inference),
     )
-    # match the scheduler's device-fp32 math once, then reuse one denoised
+    # match the scheduler's device-fp32 math once, then reuse denoised / derivative
     # scratch per modality instead of allocating intermediates every step
-    video_sigmas = torch.tensor(sigmas_video, dtype=torch.float32, device=device)
-    audio_sigmas = torch.tensor(sigmas_audio, dtype=torch.float32, device=device)
-    video_sigma_ratios = video_sigmas[1:] / video_sigmas[:-1]
-    audio_sigma_ratios = audio_sigmas[1:] / audio_sigmas[:-1]
-    video_sigma_t = 1.0 - video_step_t
-    audio_sigma_t = 1.0 - audio_step_t
-    video_one_minus_sigma_ratios = 1.0 - video_sigma_ratios
-    audio_one_minus_sigma_ratios = 1.0 - audio_sigma_ratios
     video_denoised_scratch = torch.empty_like(video_rows[video_target_slice])
     audio_denoised_scratch = torch.empty_like(audio_rows[audio_target_slice])
+    video_deriv_scratch = torch.empty_like(video_rows[video_target_slice])
+    audio_deriv_scratch = torch.empty_like(audio_rows[audio_target_slice])
+    old_denoised_video: torch.Tensor | None = None
+    old_denoised_audio: torch.Tensor | None = None
+    old_sigma_down_video: float | None = None
+    old_sigma_down_audio: float | None = None
     for step in range(num_steps):
         step_cm = step_profiler(step) if step_profiler is not None else nullcontext()
         with step_cm:
             s_v = sigmas_video[step]
-            s_a = sigmas_audio[step]
+            s_next = sigmas_video[step + 1]
+            s_prev = sigmas_video[step - 1] if step > 0 else None
+            audio_slope = minimax_h3_time_shift_slope(
+                s_v,
+                from_shift=float(sigma_shift_video),
+                to_shift=float(sigma_shift_audio),
+            )
 
             fk = positive.forward_kwargs(
                 video_rows=video_rows,
@@ -476,32 +577,63 @@ def minimax_h3_denoise_loop(
                     v_video, v_audio = model(**fk)
                 else:
                     v_video, v_audio = model_forward(model, fk, step)
-                # The model outputs are inference tensors. Keep their disposable
-                # fp32 velocity updates in the same context so ``out=velocity``
-                # can reuse the output storage without an extra clone.
-                mv_video_t = v_video.float()
-                mv_audio_t = v_audio[audio_target_slice].float()
+                if step == 0 and os.environ.get("MINIMAX_H3_DEBUG_FIRST_STEP") == "1":
+                    dump_path = os.environ.get(
+                        "MINIMAX_H3_DEBUG_FIRST_STEP_PATH",
+                        "/data/H3/logs/h3_sglang_first_dit_step.pt",
+                    )
+                    torch.save(
+                        {
+                            "v_video": v_video.detach().cpu(),
+                            "v_audio": v_audio.detach().cpu(),
+                            "sigma": float(s_v),
+                        },
+                        dump_path,
+                    )
+                # Comfy ``MiniMaxH3Model._forward`` returns ``-unpatchify(v)``; the
+                # native model emits positive patch logits, so negate here before the
+                # shared ``denoised = x - sigma * logits`` formula.
+                mv_video_t = (-v_video).float()
+                mv_audio_t = (-v_audio)[audio_target_slice].float()
 
                 video_target = video_rows[video_target_slice]
-                _minimax_h3_update_target_rows_(
+                _minimax_h3_compute_denoised_rows_(
                     video_target,
                     mv_video_t,
-                    sigma_t=video_sigma_t[step],
                     sigma_curr=s_v,
-                    sigma_ratio=video_sigma_ratios[step],
-                    one_minus_sigma_ratio=video_one_minus_sigma_ratios[step],
-                    denoised_scratch=video_denoised_scratch,
+                    out=video_denoised_scratch,
+                )
+                old_denoised_video, old_sigma_down_video = (
+                    _minimax_h3_res_multistep_target_rows_(
+                        video_target,
+                        video_denoised_scratch,
+                        sigma_curr=s_v,
+                        sigma_next=s_next,
+                        sigma_prev=s_prev,
+                        old_denoised=old_denoised_video,
+                        old_sigma_down=old_sigma_down_video,
+                        derivative_scratch=video_deriv_scratch,
+                    )
                 )
 
                 audio_target = audio_rows[audio_target_slice]
-                _minimax_h3_update_target_rows_(
+                _minimax_h3_compute_denoised_rows_(
                     audio_target,
-                    mv_audio_t,
-                    sigma_t=audio_sigma_t[step],
-                    sigma_curr=s_a,
-                    sigma_ratio=audio_sigma_ratios[step],
-                    one_minus_sigma_ratio=audio_one_minus_sigma_ratios[step],
-                    denoised_scratch=audio_denoised_scratch,
+                    mv_audio_t * float(audio_slope),
+                    sigma_curr=s_v,
+                    out=audio_denoised_scratch,
+                )
+                old_denoised_audio, old_sigma_down_audio = (
+                    _minimax_h3_res_multistep_target_rows_(
+                        audio_target,
+                        audio_denoised_scratch,
+                        sigma_curr=s_v,
+                        sigma_next=s_next,
+                        sigma_prev=s_prev,
+                        old_denoised=old_denoised_audio,
+                        old_sigma_down=old_sigma_down_audio,
+                        derivative_scratch=audio_deriv_scratch,
+                    )
                 )
             if on_step is not None:
                 on_step(step, video_rows, audio_rows)

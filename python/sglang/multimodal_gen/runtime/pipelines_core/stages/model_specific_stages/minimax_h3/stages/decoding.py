@@ -89,7 +89,9 @@ def _reverse_normalize_latents_(
         )
     view_shape = [1] * latents.ndim
     view_shape[1] = int(mean.shape[0])
-    return latents.mul_(std.view(*view_shape)).add_(mean.view(*view_shape))
+    std_view = std.view(*view_shape)
+    mean_view = mean.view(*view_shape)
+    return latents.clone().mul(std_view).add(mean_view)
 
 
 def _crop_to_target_canvas(batch: Req, frames: torch.Tensor) -> torch.Tensor:

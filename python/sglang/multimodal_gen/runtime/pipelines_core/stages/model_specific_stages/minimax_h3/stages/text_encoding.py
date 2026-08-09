@@ -38,6 +38,13 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
             )
         self.processor = processor
 
+    @staticmethod
+    def _text_encoder_force_cpu_forward(text_encoder) -> bool:
+        return bool(
+            getattr(text_encoder, "_force_cpu_forward", False)
+            or getattr(getattr(text_encoder, "module", None), "_force_cpu_forward", False)
+        )
+
     @torch.no_grad()
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.resolved_plan import (
@@ -255,7 +262,8 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
             raise ValueError(
                 "MiniMaxH3TextEncodingStage direct encode requires a tokenizer component"
             )
-        self._manage_text_encoder_use(0)
+        if not self._text_encoder_force_cpu_forward(self.text_encoder):
+            self._manage_text_encoder_use(0)
         with set_forward_context(current_timestep=0, attn_metadata=None):
             if plan.task == "ref2va":
                 embeddings = self._encode_ref2va(batch, plan, encode_ids)

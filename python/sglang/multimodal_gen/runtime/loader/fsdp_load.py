@@ -239,8 +239,18 @@ def maybe_load_fsdp_model(
         mp_policy=mp_policy,
     )
 
+    weight_load_plan = weight_load_plan or WeightLoadPlan(checkpoint_load_device=device)
+
     with set_default_torch_dtype(default_torch_dtype), torch.device("meta"):
         model = model_cls(**init_params)
+
+    if hasattr(torch, "set_default_device"):
+        reset_device = (
+            "cpu"
+            if weight_load_plan.checkpoint_load_device.type == "cpu"
+            else str(device)
+        )
+        torch.set_default_device(reset_device)
 
     # Check if we should use FSDP
     use_fsdp = fsdp_inference
@@ -250,7 +260,6 @@ def maybe_load_fsdp_model(
         use_fsdp = False
         logger.info("Disabling FSDP for MPS platform as it's not compatible")
 
-    weight_load_plan = weight_load_plan or WeightLoadPlan(checkpoint_load_device=device)
     defer_cpu_offload = bool(
         cpu_offload and weight_load_plan.defer_component_cpu_offload
     )

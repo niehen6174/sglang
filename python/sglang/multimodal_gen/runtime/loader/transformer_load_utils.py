@@ -34,6 +34,9 @@ from sglang.multimodal_gen.runtime.utils.quantization_utils import (
     get_quant_config,
     get_quant_config_from_safetensors_metadata,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.comfy_quant import (
+    ComfyQuantConfig,
+)
 from sglang.srt.layers.quantization import QuantizationConfig
 
 logger = init_logger(__name__)
@@ -270,6 +273,40 @@ class _ModelOptFp8OffloadAdapter(_TransformerQuantAdapter):
 
     def prepare(self) -> None:
         _ModelOptFp8OffloadAdapter._maybe_disable_incompatible_dit_offload_modes(
+            server_args=self.server_args,
+            quant_config=self.quant_config,
+        )
+
+
+class _ComfyQuantOffloadAdapter(_TransformerQuantAdapter):
+    """Adapter for ComfyUI ``.comfy_quant`` diffusion checkpoints."""
+
+    def __init__(
+        self,
+        *,
+        server_args: ServerArgs,
+        quant_config: Optional[QuantizationConfig],
+    ) -> None:
+        self.server_args = server_args
+        self.quant_config = quant_config
+
+    @staticmethod
+    def _maybe_disable_incompatible_dit_offload_modes(
+        server_args: ServerArgs,
+        quant_config: Optional[QuantizationConfig],
+    ) -> None:
+        if _get_quant_config_name(quant_config) != "comfy_quant":
+            return
+
+        if server_args.dit_cpu_offload:
+            server_args.dit_cpu_offload = False
+            logger.warning(
+                "ComfyQuant diffusion checkpoints keep dit_cpu_offload disabled; "
+                "layerwise DiT offload remains enabled.",
+            )
+
+    def prepare(self) -> None:
+        _ComfyQuantOffloadAdapter._maybe_disable_incompatible_dit_offload_modes(
             server_args=self.server_args,
             quant_config=self.quant_config,
         )
@@ -523,6 +560,10 @@ def _build_transformer_quant_adapters(
             server_args=server_args,
             quant_config=quant_config,
         ),
+        _ComfyQuantOffloadAdapter(
+            server_args=server_args,
+            quant_config=quant_config,
+        ),
         _BitsAndBytes4BitAdapter(
             server_args=server_args,
             quant_config=quant_config,
@@ -596,6 +637,15 @@ def _resolve_quant_config(
         if server_args.quantization == "modelslim":
             return get_quant_config(hf_config, component_model_path)
 
+        if server_args.quantization == "comfy_quant":
+            comfy_config = ComfyQuantConfig.from_safetensors_list(safetensors_list)
+            if comfy_config is None:
+                raise ValueError(
+                    "Requested --quantization comfy_quant but no .comfy_quant "
+                    "layer descriptions were found in the transformer safetensors."
+                )
+            return comfy_config
+
         # Online-quant convention: for `fp8` and `mxfp4`, a no-arg
         # QuantizationConfig() selects the post-load path -- weights load
         # in source dtype and are quantized in
@@ -640,6 +690,10 @@ def _resolve_quant_config(
             fallback_group_size,
         )
     quant_config = _merge_modelopt_fp4_configs(quant_config, inferred_nvfp4_config)
+    if quant_config is None:
+        inferred_comfy_config = ComfyQuantConfig.from_safetensors_list(safetensors_list)
+        if inferred_comfy_config is not None:
+            quant_config = inferred_comfy_config
     if quant_config is not None or not server_args.transformer_weights_path:
         return quant_config
 

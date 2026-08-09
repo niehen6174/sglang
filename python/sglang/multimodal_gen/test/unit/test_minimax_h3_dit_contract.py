@@ -26,6 +26,7 @@ from sglang.multimodal_gen.runtime.models.dits.minimax_h3 import (
     MINIMAX_H3_FP32_BUFFER_NAMES,
     MINIMAX_H3_FP32_PARAM_NAMES,
     MiniMaxH3DiTModel,
+    _copy_flat_qkv_tp_shard,
     _copy_grouped_qkv_tp_shard,
     _reorder_grouped_qkv_to_qkv,
 )
@@ -94,6 +95,31 @@ def test_native_weight_names_and_grouped_qkv_reorder():
             expected_shard = reordered.view(3, 8, 2)[
                 :, start : start + local_rows
             ].reshape(-1, 2)
+            assert torch.equal(
+                param.view(torch.int16), expected_shard.view(torch.int16)
+            )
+
+    flat = torch.arange(48, dtype=torch.int16).reshape(48, 1).view(torch.bfloat16)
+    for tp_size in (1, 2, 4):
+        local_rows = 16 // tp_size
+        for tp_rank in range(tp_size):
+            start = tp_rank * local_rows
+            param = torch.nn.Parameter(
+                torch.empty(3 * local_rows, 1, dtype=torch.bfloat16),
+                requires_grad=False,
+            )
+            param.output_dim = 0
+            assert _copy_flat_qkv_tp_shard(
+                param,
+                flat,
+                num_heads=4,
+                head_dim=4,
+                tp_rank=tp_rank,
+                tp_size=tp_size,
+            )
+            expected_shard = flat.view(3, 16, 1)[
+                :, start : start + local_rows
+            ].reshape(-1, 1)
             assert torch.equal(
                 param.view(torch.int16), expected_shard.view(torch.int16)
             )

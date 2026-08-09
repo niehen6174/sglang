@@ -2,7 +2,7 @@
 """MiniMax H3 packed-sequence materialization from the validated workspace
 builder, covering fl2va and t2va layouts.
 
-Layout: [text L | imgvid_cond C | audio A(=t*2ch) | video_target V | pad P].
+Layout: [text L | imgvid_cond C | audio A(=t*2ch) | video_target V].
 Builder rules:
 - block-derived position infos, update masks, token tags, and cu_seqlens
 - img_position_ids fp64 grid: text rows (row_idx,0,0); video/cond t counter
@@ -127,10 +127,8 @@ def minimax_h3_packed_sequence(
     keyframe_frame_indices: list[int] | tuple[int, ...] | None = None,
     frame_count: int | None = None,
 ) -> dict[str, Any]:
-    """Build the packed-sequence structural fields for one CFG branch.
+    """Build the packed-sequence structural fields for one CFG branch."""
 
-    The used length is padded up to a multiple of 64.
-    """
     ph, pw = latent_h // _PATCH_H, latent_w // _PATCH_W
     frame_rows = ph * pw
     cond_frame_indices = _keyframe_cond_frame_indices(
@@ -145,11 +143,9 @@ def minimax_h3_packed_sequence(
     video_rows = latent_t * frame_rows
     audio_rows = audio_t * audio_channel
     used = text_len + cond_rows + audio_rows + video_rows
-    seq_len = (
-        (used + MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT - 1)
-        // MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
-        * MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
-    )
+    # Comfy PackedLayout uses the exact used row count with no tail padding.
+    # Alignment padding created a second varlen segment and corrupted attention.
+    seq_len = used
 
     text_sl = slice(0, text_len)
     cond_sl = slice(text_len, text_len + cond_rows)
@@ -206,7 +202,7 @@ def minimax_h3_packed_sequence(
     token_tags[audio_sl] = 2  # AUDIO
     token_tags[img_pos] = 0  # VIDEO
 
-    cu = torch.tensor([0, used, seq_len], dtype=torch.int32)
+    cu = torch.tensor([0, used], dtype=torch.int32)
     return {
         "seq_len": seq_len,
         "img_pos": img_pos,
@@ -350,11 +346,7 @@ def minimax_h3_packed_sequence_ref2va_blocks(
     ref_rows = ref_visual_rows + ref_audio_rows
     used = text_len + ref_rows + audio_rows + video_rows
     if seq_len is None:
-        seq_len = (
-            (used + MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT - 1)
-            // MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
-            * MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
-        )
+        seq_len = used
     if seq_len < used:
         raise ValueError(f"seq_len {seq_len} < used rows {used}")
 
@@ -482,7 +474,7 @@ def minimax_h3_packed_sequence_ref2va_blocks(
     token_tags[audio_pos] = 2  # AUDIO (refs + target)
     token_tags[img_pos] = 0  # VIDEO (refs + target)
 
-    cu = torch.tensor([0, used, seq_len], dtype=torch.int32)
+    cu = torch.tensor([0, used], dtype=torch.int32)
     return {
         "seq_len": seq_len,
         "img_pos": img_pos,

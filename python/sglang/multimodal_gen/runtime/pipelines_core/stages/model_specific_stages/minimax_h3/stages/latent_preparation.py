@@ -65,9 +65,10 @@ class MiniMaxH3LatentPreparationStage(PipelineStage):
 
     def _prepare_denoise_state_from_plan(self, batch: Req, plan) -> None:
         """Direct initial-noise materialization (t2va recipe):
-        torch.Generator().manual_seed(seed); video rows drawn first,
-        then audio rows, CPU fp32. Every task consumes the final latent grid
-        frozen by the pre-queue shape resolver."""
+        torch.Generator().manual_seed(seed); video rows drawn first on the raw
+        latent tensor, then audio rows on [1, 32, 2, T] before packing.
+        CPU fp32. Every task consumes the final latent grid frozen by the
+        pre-queue shape resolver."""
         from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.constants import (
             MINIMAX_H3_DENOISE_STATE_EXTRA_KEY,
         )
@@ -106,26 +107,32 @@ class MiniMaxH3LatentPreparationStage(PipelineStage):
         #   requests.
         # The same seed always reproduces the same noise.
         from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.packed_tokens import (
+            minimax_h3_pack_audio_latent,
             minimax_h3_patchify_video_latent,
         )
 
-        gen_v = torch.Generator().manual_seed(int(seed))
+        gen = torch.Generator().manual_seed(int(seed))
         video_tensor = torch.randn(
             1,
             24,
             latent_t,
             latent_h,
             latent_w,
-            generator=gen_v,
+            generator=gen,
             dtype=torch.float32,
         )
         video_noise = minimax_h3_patchify_video_latent(
             video_tensor, patch_size=[1, 2, 2]
         ).to(torch.float32)
-        gen_a = torch.Generator().manual_seed(int(seed))
-        audio_noise = torch.randn(
-            audio_rows_n, 32, generator=gen_a, dtype=torch.float32
+        audio_tensor = torch.randn(
+            1,
+            32,
+            2,
+            audio_t,
+            generator=gen,
+            dtype=torch.float32,
         )
+        audio_noise = minimax_h3_pack_audio_latent(audio_tensor).to(torch.float32)
         if list(video_noise.shape) != [video_rows_n, 96]:
             raise ValueError(
                 f"aligned video noise shape {list(video_noise.shape)} != "

@@ -16,6 +16,9 @@ from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
     ModelOptFp4Config,
     ModelOptFp8Config,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.comfy_quant import (
+    ComfyQuantConfig,
+)
 from sglang.multimodal_gen.runtime.layers.quantization.modelslim import ModelSlimConfig
 from sglang.multimodal_gen.runtime.layers.quantization.mxfp4 import Mxfp4Config
 from sglang.multimodal_gen.runtime.layers.quantization.mxfp4_npu import (
@@ -33,6 +36,7 @@ QuantizationMethods = Literal[
     "mxfp8",
     "mxfp4",
     "mxfp4_npu",
+    "comfy_quant",
 ]
 
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
@@ -48,6 +52,7 @@ _CUSTOMIZED_METHOD_TO_QUANT_CONFIG = {
     "mxfp4": Mxfp4Config,
     "mxfp8": MXFP8Config,
     "mxfp4_npu": NPUMXFP4Config,
+    "comfy_quant": ComfyQuantConfig,
 }
 
 

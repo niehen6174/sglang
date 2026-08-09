@@ -97,7 +97,18 @@ def minimax_h3_unpack_audio_tokens(
     return native.permute(0, 2, 1).contiguous()
 
 
+def minimax_h3_pack_audio_latent(latent: torch.Tensor) -> torch.Tensor:
+    """Pack SGLang audio latent [B,C,ch,T] into DiT token rows [ch*T,C]."""
+
+    _rank(latent, "audio latent", 4)
+    batch, channel, ch, t = (int(dim) for dim in latent.shape)
+    if batch != 1:
+        raise ValueError(f"audio latent batch must be 1, got {batch}")
+    return latent[0].permute(1, 2, 0).reshape(ch * t, channel).contiguous()
+
+
 __all__ = [
+    "minimax_h3_pack_audio_latent",
     "minimax_h3_patchify_video_latent",
     "minimax_h3_unpack_audio_tokens",
     "minimax_h3_unpatchify_video_tokens",

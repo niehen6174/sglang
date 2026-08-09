@@ -29,6 +29,49 @@ def minimax_h3_audio_latent_t(duration_seconds: float) -> int:
     return int(round(float(duration_seconds) * 40.0))
 
 
+def minimax_h3_time_shift_sigma(
+    sigma: float,
+    *,
+    from_shift: float,
+    to_shift: float,
+) -> float:
+    """Map a video-stream sigma onto the audio stream's shifted schedule.
+
+    Matches ComfyUI ``comfy/ldm/minimax/model.py::time_shift_sigma``.
+    """
+
+    sigma = float(sigma)
+    from_shift = float(from_shift)
+    to_shift = float(to_shift)
+    if from_shift <= 0.0 or to_shift <= 0.0:
+        raise ValueError("sigma shift scales must be > 0")
+    base = sigma / (from_shift + sigma * (1.0 - from_shift))
+    return to_shift * base / (1.0 + (to_shift - 1.0) * base)
+
+
+def minimax_h3_time_shift_slope(
+    sigma: float,
+    *,
+    from_shift: float,
+    to_shift: float,
+) -> float:
+    """Jacobian ``d(sigma_to)/d(sigma_from)`` for paired stream schedules.
+
+    Comfy scales the audio velocity by this slope so a flat video-sigma ODE
+    matches the audio stream's true shifted schedule.
+    """
+
+    sigma = float(sigma)
+    from_shift = float(from_shift)
+    to_shift = float(to_shift)
+    if from_shift <= 0.0 or to_shift <= 0.0:
+        raise ValueError("sigma shift scales must be > 0")
+    base = sigma / (from_shift + sigma * (1.0 - from_shift))
+    return (to_shift * (1.0 + (from_shift - 1.0) * base) ** 2) / (
+        from_shift * (1.0 + (to_shift - 1.0) * base) ** 2
+    )
+
+
 def minimax_h3_time_shift_sigmas(
     *,
     num_steps: int = 50,
@@ -41,19 +84,15 @@ def minimax_h3_time_shift_sigmas(
 
     import torch
 
-    # The rectified-flow sigma range is fixed at [1.0, 0.0].
-    base = torch.linspace(
-        1.0,
-        0.0,
-        int(num_steps),
-        device="cpu",
-        dtype=torch.float32,
+    # Match ComfyUI ModelSamplingDiscreteFlow + BasicScheduler("simple"):
+    # build a dense [1/1000..1] grid, apply the flow shift, then subsample
+    # ``num_steps`` interior points and append a terminal 0.0 sigma.
+    dense_steps = 1000
+    base = torch.arange(1, dense_steps + 1, dtype=torch.float32) / dense_steps
+    shifted = float(shift_scale) * base / (
+        1 + (float(shift_scale) - 1) * base
     )
-    shifted = float(shift_scale) * base / (1 + (float(shift_scale) - 1) * base)
-    shifted, _ = torch.unique_consecutive(shifted, return_counts=True)
-    # A one-point request is still exactly one point.  Normal serving uses
-    # multiple points, but preserving the requested cardinality keeps
-    # ``num_inference_steps`` the sole schedule-size control.
-    if num_steps > 1 and shifted[-1].item() > 0.0:
-        shifted = torch.cat([shifted, torch.tensor([0.0], dtype=shifted.dtype)])
-    return [float(value) for value in shifted.tolist()]
+    stride = dense_steps / float(num_steps)
+    sigmas = [float(shifted[-(1 + int(step * stride))]) for step in range(num_steps)]
+    sigmas.append(0.0)
+    return sigmas

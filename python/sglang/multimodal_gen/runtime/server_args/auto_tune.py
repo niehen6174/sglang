@@ -467,32 +467,29 @@ class ServerArgsAutoTuner:
 
     def _should_auto_enable_dit_layerwise_offload(self) -> bool:
         args = self.server_args
-
-        # only for wan for now
-        if not self._is_wan_pipeline_config():
-            return False
         if not self._deployment_config().auto_dit_layerwise_offload:
             return False
 
         if (
-            args.pipeline_config.dmd_denoising_steps is not None
-            or not current_platform.enable_dit_layerwise_offload_for_wan_by_default()
-            or envs.SGLANG_CACHE_DIT_ENABLED
+            envs.SGLANG_CACHE_DIT_ENABLED
             or args.use_fsdp_inference
             or args.is_arg_explicitly_set("dit_cpu_offload")
         ):
             return False
 
-        # memory mode is memory-first: keep the broad Wan DiT layerwise policy
-        # unless a guard above says it conflicts with another placement path
-        if args.performance_mode == "memory":
-            return True
+        if self._is_wan_pipeline_config():
+            if args.pipeline_config.dmd_denoising_steps is not None:
+                return False
+            if not current_platform.enable_dit_layerwise_offload_for_wan_by_default():
+                return False
+            if args.performance_mode == "memory":
+                return True
+            return (
+                args.performance_mode == "auto"
+                and self._is_wan2_2_a14b_pipeline_config()
+            )
 
-        # auto mode is performance-first: profiling only showed clear wins for
-        # Wan2.2 A14B, where coarse DiT CPU offload creates large step spikes
-        return (
-            args.performance_mode == "auto" and self._is_wan2_2_a14b_pipeline_config()
-        )
+        return args.performance_mode in ("memory", "auto")
 
     def _is_wan2_2_a14b_pipeline_config(self) -> bool:
         config_name = self.server_args.pipeline_config.__class__.__name__

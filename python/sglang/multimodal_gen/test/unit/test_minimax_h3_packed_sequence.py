@@ -21,7 +21,7 @@ class TestMiniMaxH3PackedSequence(unittest.TestCase):
         )
         self.assertTrue(built["update_mask"].all())
         self.assertEqual(int(built["img_pos"].shape[0]), 62 * 24 * 38)
-        self.assertEqual(int(built["seq_len"]) % 64, 0)
+        self.assertEqual(int(built["seq_len"]), 97 + 348 * 2 + 62 * 24 * 38)
         self.assertEqual(built["token_tags"][built["audio_pos"]].unique().tolist(), [2])
 
     def test_fl2va_first_last_cond_blocks_use_exact_rope_span(self):
@@ -124,7 +124,10 @@ class TestMiniMaxH3PackedSequence(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(int(built["seq_len"]) % 64, 0)
+        self.assertEqual(
+            int(built["seq_len"]),
+            97 + 32 * 24 + 582 * 2 + 631 * 2 + 112 * 24 * 42,
+        )
         self.assertEqual(int((~built["update_mask"]).sum()), 32 * 24)
         self.assertEqual(int((~built["audio_update_mask"]).sum()), 582 * 2)
         self.assertEqual(built["token_tags"][built["audio_pos"]].unique().tolist(), [2])

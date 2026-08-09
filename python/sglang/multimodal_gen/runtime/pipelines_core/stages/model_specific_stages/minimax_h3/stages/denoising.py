@@ -591,7 +591,16 @@ class MiniMaxH3DenoisingStage(DenoisingStage):
                     keyframe_cond_rows=ctx.cond_rows,
                     audio_ref_rows=ctx.audio_ref_rows,
                     sigmas_video=sigmas_video,
-                    sigmas_audio=[float(v) for v in ctx.sigmas["audio"]],
+                    sigma_shift_video=(
+                        ctx.plan.flow_shift
+                        if ctx.plan.flow_shift is not None
+                        else ctx.plan.default_flow_shift
+                    ),
+                    sigma_shift_audio=(
+                        ctx.plan.audio_flow_shift
+                        if ctx.plan.audio_flow_shift is not None
+                        else ctx.plan.default_audio_flow_shift
+                    ),
                     device=device,
                     imgvid_cond_noise_aug_for_inference=float(imgvid_noise_aug),
                     audio_cond_noise_aug_for_inference=float(audio_noise_aug),

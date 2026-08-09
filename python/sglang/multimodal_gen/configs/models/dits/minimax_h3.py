@@ -42,6 +42,13 @@ class MiniMaxH3DiTArchConfig(DiTArchConfig):
     norm_eps: float = 1e-5
     qk_norm_eps: float = 1e-5
     final_norm_eps: float = 1e-5
+    # Comfy MiniMax H3 checkpoints store qkv rows as [Q_all, K_all, V_all].
+    # Some other checkpoints use grouped [q,k,v] per query group instead.
+    qkv_checkpoint_layout: str = "flat"
+    # When set (typically 1025), the pruned Comfy checkpoint stores a shared
+    # time-embedding curve table instead of ``time_embedder`` weights.
+    adaln_curve_grid: int | None = None
+    adaln_curve_dim: int = 8
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -49,7 +56,21 @@ class MiniMaxH3DiTArchConfig(DiTArchConfig):
             self.patch_size = tuple(self.patch_size)
         if len(self.patch_size) != 3:
             raise ValueError(f"patch_size must have 3 values, got {self.patch_size}.")
+        if self.adaln_curve_grid is not None and self.adaln_curve_grid < 2:
+            raise ValueError(
+                "adaln_curve_grid must be at least 2 when curve pruning is enabled."
+            )
+        if self.adaln_curve_dim <= 0:
+            raise ValueError("adaln_curve_dim must be positive.")
         self.num_channels_latents = self.latents_dim
+
+    @property
+    def use_adaln_curve(self) -> bool:
+        return self.adaln_curve_grid is not None
+
+    @property
+    def adaln_input_dim(self) -> int:
+        return self.adaln_curve_dim if self.use_adaln_curve else self.time_embed_dim
 
 
 @dataclass

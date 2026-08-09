@@ -172,8 +172,13 @@ class TransformerLoader(ComponentLoader):
             logger.debug("quantization config: %s", init_params["quant_config"])
 
         local_torch_device = get_local_torch_device()
+        load_device = (
+            torch.device("cpu")
+            if component_server_args.is_dit_layerwise_offload_selected
+            else local_torch_device
+        )
         weight_load_plan = WeightLoadPlan.for_component(
-            checkpoint_load_device=local_torch_device,
+            checkpoint_load_device=load_device,
             needs_device_weight_postprocess=quant_spec.needs_device_weight_postprocess,
             component_cpu_offload=bool(component_server_args.dit_cpu_offload),
         )
@@ -183,7 +188,7 @@ class TransformerLoader(ComponentLoader):
             model_cls=model_cls,
             init_params=init_params,
             weight_dir_list=safetensors_list,
-            device=local_torch_device,
+            device=load_device,
             hsdp_replicate_dim=server_args.hsdp_replicate_dim,
             hsdp_shard_dim=server_args.hsdp_shard_dim,
             cpu_offload=component_server_args.dit_cpu_offload,
@@ -201,5 +206,14 @@ class TransformerLoader(ComponentLoader):
             post_load_hook(model)
 
         _warn_if_expected_param_dtype_missing(model, quant_spec.param_dtype)
+
+        if hasattr(torch, "set_default_device"):
+            torch.set_default_device("cpu")
+
+        from sglang.multimodal_gen.runtime.layers.quantization.comfy_quant_kernel_adapter import (
+            ensure_comfy_kitchen_nvfp4_lut_materialized,
+        )
+
+        ensure_comfy_kitchen_nvfp4_lut_materialized()
 
         return model

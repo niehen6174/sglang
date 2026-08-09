@@ -3,6 +3,7 @@
 
 from unittest.mock import patch
 
+import pytest
 import torch
 
 from sglang.multimodal_gen.configs.models.dits.minimax_h3 import (
@@ -15,6 +16,7 @@ from sglang.multimodal_gen.runtime.models.schedulers.scheduling_minimax_h3_euler
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.denoise_loop import (
     MiniMaxH3DenoiseBranch,
     _build_local_embedding_layout,
+    _minimax_h3_res_multistep_target_rows_,
     _minimax_h3_update_target_rows_,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.packed_sequence import (
@@ -116,6 +118,29 @@ def test_precomputed_timestep_plan_matches_full_unique_reference():
         assert repeated_plan[1][2] is repeated_plan[2][2]
 
 
+def test_res_multistep_first_step_matches_euler_flow():
+    generator = torch.Generator().manual_seed(11)
+    state = torch.randn(9, 16, generator=generator)
+    model_output = torch.randn(9, 16, generator=generator)
+    sigma_curr, sigma_next = 0.8, 0.5
+    denoised = state + sigma_curr * model_output
+    expected = state + ((state - denoised) / sigma_curr) * (sigma_next - sigma_curr)
+
+    actual = state.clone()
+    scratch = torch.empty_like(actual)
+    _minimax_h3_res_multistep_target_rows_(
+        actual,
+        denoised,
+        sigma_curr=sigma_curr,
+        sigma_next=sigma_next,
+        sigma_prev=None,
+        old_denoised=None,
+        old_sigma_down=None,
+        derivative_scratch=scratch,
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=1e-6)
+
+
 def test_inplace_target_update_matches_scheduler_math():
     generator = torch.Generator().manual_seed(7)
     for sigma_curr, sigma_next in ((1.0, 0.7), (0.2, 0.0), (0.0, 0.0)):
@@ -151,6 +176,8 @@ def test_local_text_layout_is_a_contiguous_prefix_per_ulysses_rank():
         branch = _branch(mode)
         text_len = int(branch.static_kwargs["prompt_embeds"].shape[0])
         for world_size in (1, 2, 4, 8):
+            if branch.seq_len % world_size:
+                continue
             for rank in range(world_size):
                 layout = _build_local_embedding_layout(
                     seq_len=branch.seq_len,
@@ -179,6 +206,8 @@ def test_rank_local_token_tags_match_reference_slice():
         seq_len = _branch(mode).seq_len
         token_tags = torch.arange(seq_len, dtype=torch.long) - seq_len // 2
         for world_size in (1, 2, 4, 8):
+            if seq_len % world_size:
+                continue
             for rank in range(world_size):
                 with patch(
                     "sglang.multimodal_gen.runtime.pipelines_core.stages."
@@ -193,3 +222,60 @@ def test_rank_local_token_tags_match_reference_slice():
                 torch.testing.assert_close(
                     branch.static_kwargs["block_token_tags"], expected, rtol=0, atol=0
                 )
+
+
+def test_time_shift_sigma_and_slope_match_comfy():
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.time_request import (
+        minimax_h3_time_shift_sigma,
+        minimax_h3_time_shift_slope,
+        minimax_h3_time_shift_sigmas,
+    )
+
+    def comfy_sigma(sigma, from_shift, to_shift):
+        base = sigma / (from_shift + sigma * (1.0 - from_shift))
+        return to_shift * base / (1.0 + (to_shift - 1.0) * base)
+
+    def comfy_slope(sigma, from_shift, to_shift):
+        base = sigma / (from_shift + sigma * (1.0 - from_shift))
+        return (to_shift * (1.0 + (from_shift - 1.0) * base) ** 2) / (
+            from_shift * (1.0 + (to_shift - 1.0) * base) ** 2
+        )
+
+    for sigma in (1.0, 0.75, 0.5, 0.25, 0.05):
+        assert minimax_h3_time_shift_sigma(
+            sigma, from_shift=12.0, to_shift=3.0
+        ) == comfy_sigma(sigma, 12.0, 3.0)
+        assert minimax_h3_time_shift_slope(
+            sigma, from_shift=12.0, to_shift=3.0
+        ) == comfy_slope(sigma, 12.0, 3.0)
+
+    audio_schedule = minimax_h3_time_shift_sigmas(num_steps=20, shift_scale=3.0)
+    video_schedule = minimax_h3_time_shift_sigmas(num_steps=20, shift_scale=12.0)
+    for sigma_v, sigma_a in zip(video_schedule[:-1], audio_schedule[:-1]):
+        derived = minimax_h3_time_shift_sigma(
+            sigma_v, from_shift=12.0, to_shift=3.0
+        )
+        assert derived == pytest.approx(sigma_a, rel=0.0, abs=1e-5)
+
+
+def test_time_shift_sigmas_match_comfy_simple_scheduler():
+    import torch
+
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.time_request import (
+        minimax_h3_time_shift_sigmas,
+    )
+
+    def comfy_simple_sigmas(steps: int, shift: float = 12.0) -> list[float]:
+        base = torch.arange(1, 1001, dtype=torch.float32) / 1000.0
+        shifted = shift * base / (1 + (shift - 1) * base)
+        stride = 1000 / float(steps)
+        sigmas = [
+            float(shifted[-(1 + int(step * stride))]) for step in range(steps)
+        ]
+        sigmas.append(0.0)
+        return sigmas
+
+    for steps in (4, 20, 50):
+        expected = comfy_simple_sigmas(steps)
+        actual = minimax_h3_time_shift_sigmas(num_steps=steps, shift_scale=12.0)
+        assert actual == expected

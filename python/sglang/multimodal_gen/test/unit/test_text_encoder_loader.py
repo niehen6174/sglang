@@ -9,6 +9,8 @@ from sglang.multimodal_gen.runtime.loader.component_loaders.text_encoder_loader 
 )
 from sglang.multimodal_gen.runtime.models.encoders.minimax_h3_qwen3vl import (
     MiniMaxH3Qwen3VLEncoder,
+    _attach_comfy_h3_te_pre_quant_scales,
+    _is_int8_embedding_checkpoint_weight,
 )
 
 
@@ -83,6 +85,22 @@ class TestTextEncoderClassResolution(unittest.TestCase):
 
 
 class TestMiniMaxH3CheckpointFilter(unittest.TestCase):
+    def test_int8_embedding_weight_detection(self):
+        import torch
+
+        self.assertTrue(
+            _is_int8_embedding_checkpoint_weight(
+                "model.language_model.embed_tokens.weight",
+                torch.empty(4, 8, dtype=torch.int8),
+            )
+        )
+        self.assertFalse(
+            _is_int8_embedding_checkpoint_weight(
+                "model.language_model.layers.0.mlp.gate_proj.weight",
+                torch.empty(4, 8, dtype=torch.int8),
+            )
+        )
+
     def test_only_known_unconsumed_weights_are_filtered(self):
         should_load = MiniMaxH3Qwen3VLEncoder.should_materialize_checkpoint_weight
         expected = {
@@ -100,6 +118,34 @@ class TestMiniMaxH3CheckpointFilter(unittest.TestCase):
             {name: should_load(name) for name in expected},
             expected,
         )
+
+    def test_pre_quant_scale_buffers_attach_to_linears(self):
+        import torch
+
+        down = torch.nn.Linear(4, 2, bias=False)
+        o_proj = torch.nn.Linear(4, 2, bias=False)
+        layer = torch.nn.Module()
+        layer.mlp = torch.nn.Module()
+        layer.mlp.down_proj = down
+        layer.self_attn = torch.nn.Module()
+        layer.self_attn.o_proj = o_proj
+        model = torch.nn.Module()
+        model.model = torch.nn.Module()
+        model.model.language_model = torch.nn.Module()
+        model.model.language_model.layers = torch.nn.ModuleList([layer])
+        pending = {
+            "model.language_model.layers.0.mlp.down_proj.pre_quant_scale": torch.ones(
+                4, dtype=torch.bfloat16
+            ),
+            "model.language_model.layers.0.self_attn.o_proj.pre_quant_scale": (
+                torch.full((4,), 2.0, dtype=torch.bfloat16)
+            ),
+        }
+        _attach_comfy_h3_te_pre_quant_scales(model, pending)
+        self.assertTrue(hasattr(down, "pre_quant_scale"))
+        self.assertTrue(hasattr(o_proj, "pre_quant_scale"))
+        self.assertEqual(tuple(down.pre_quant_scale.shape), (4,))
+        self.assertEqual(float(o_proj.pre_quant_scale[0]), 2.0)
 
 
 if __name__ == "__main__":

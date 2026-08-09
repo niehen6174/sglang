@@ -194,6 +194,15 @@ def _gather_tensor_parallel_activation(
     return tensor_model_parallel_all_gather(x, tp_group=tp_group)
 
 
+def _apply_pre_quant_scale(x: torch.Tensor, linear: nn.Module) -> torch.Tensor:
+    """Apply Comfy NVFP4 AWQ smoothing scale before selected linear layers."""
+
+    scale = getattr(linear, "pre_quant_scale", None)
+    if scale is None:
+        return x
+    return x * scale.to(device=x.device, dtype=x.dtype)
+
+
 class Qwen3VLTextAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -343,7 +352,7 @@ class Qwen3VLTextAttention(nn.Module):
             self.o_proj, (Qwen3VLRowParallelLinear, WeightOnlyFP8RowParallelLinear)
         ):
             attn_output = _gather_tensor_parallel_activation(attn_output, self.q_proj)
-        attn_output = self.o_proj(attn_output)
+        attn_output = self.o_proj(_apply_pre_quant_scale(attn_output, self.o_proj))
         return attn_output
 
 
@@ -399,7 +408,9 @@ class Qwen3VLTextMLP(nn.Module):
             hidden_states = _gather_tensor_parallel_activation(
                 hidden_states, self.gate_proj
             )
-        down_proj = self.down_proj(hidden_states)
+        down_proj = self.down_proj(
+            _apply_pre_quant_scale(hidden_states, self.down_proj)
+        )
         return down_proj
 
 
@@ -662,12 +673,13 @@ class Qwen3VLModel(nn.Module):
     config: Qwen3VLConfig
     _no_split_modules = ["Qwen3VLTextDecoderLayer", "Qwen3VLVisionBlock"]
 
-    def __init__(self, config, *, use_tensor_parallel: bool = False):
+    def __init__(self, config, *, use_tensor_parallel: bool = False, quant_config=None):
         super().__init__()
         self.visual = Qwen3VLVisionModel._from_config(config.vision_config)
         self.language_model = Qwen3VLTextModel(
             config.text_config,
             use_tensor_parallel=use_tensor_parallel,
+            quant_config=quant_config,
         )
         self.rope_deltas = None  # cache rope_deltas here
         self.config = config

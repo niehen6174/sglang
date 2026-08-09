@@ -8,6 +8,7 @@ contract accepts packed inference keyword arguments and returns packed logits.
 from __future__ import annotations
 
 import math
+import os
 from typing import Any
 
 import torch
@@ -15,10 +16,6 @@ import torch.nn as nn
 
 from sglang.kernels.ops.activation.activation import (
     silu_and_mul_with_activation_rounding_,
-)
-from sglang.kernels.ops.diffusion.qknorm_rope import (
-    can_use_fused_inplace_qknorm_rope,
-    fused_inplace_qknorm_rope,
 )
 from sglang.kernels.ops.diffusion.triton.indexed_modulation import (
     indexed_gate_bf16_,
@@ -50,6 +47,9 @@ from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload im
     is_layerwise_offloaded_module,
 )
 from sglang.multimodal_gen.runtime.models.dits.base import BaseDiT
+from sglang.multimodal_gen.runtime.models.dits.minimax_h3_adaln_curve import (
+    interpolate_adaln_t_table,
+)
 from sglang.multimodal_gen.runtime.platforms import (
     AttentionBackendEnum,
     current_platform,
@@ -62,15 +62,18 @@ _ARCH_DEFAULTS = MiniMaxH3DiTArchConfig()
 _BF16_DTYPE = torch.bfloat16
 _FP32_DTYPE = torch.float32
 
+_MINIMAX_H3_TIME_EMBEDDER_FP32_PARAM_NAMES = (
+    "time_embedder.proj_in.weight",
+    "time_embedder.proj_in.bias",
+    "time_embedder.proj_out.weight",
+    "time_embedder.proj_out.bias",
+)
 _MINIMAX_H3_FP32_PARAM_NAMES_IN_MODEL_ORDER = (
     "video_patch_proj.weight",
     "video_patch_proj.bias",
     "audio_patch_proj.weight",
     "audio_patch_proj.bias",
-    "time_embedder.proj_in.weight",
-    "time_embedder.proj_in.bias",
-    "time_embedder.proj_out.weight",
-    "time_embedder.proj_out.bias",
+    *_MINIMAX_H3_TIME_EMBEDDER_FP32_PARAM_NAMES,
     "final_layer.video_out.weight",
     "final_layer.video_out.bias",
     "final_layer.audio_out.weight",
@@ -216,6 +219,48 @@ def _copy_grouped_qkv_tp_shard(
     return True
 
 
+def _copy_flat_qkv_tp_shard(
+    param: torch.Tensor,
+    loaded_weight: torch.Tensor,
+    *,
+    num_heads: int,
+    head_dim: int,
+    tp_rank: int,
+    tp_size: int,
+) -> bool:
+    """Copy a flat [Q_all, K_all, V_all] checkpoint into a TP-local qkv shard."""
+    if (
+        tp_size <= 0
+        or not 0 <= tp_rank < tp_size
+        or num_heads % tp_size
+        or getattr(param, "output_dim", None) != 0
+        or getattr(param, "is_sharded_weight", False)
+        or getattr(param, "packed_dim", None) is not None
+        or not param.is_contiguous()
+        or not loaded_weight.is_contiguous()
+    ):
+        return False
+
+    qkv_rows = num_heads * head_dim
+    expected_rows = 3 * qkv_rows
+    local_heads = num_heads // tp_size
+    local_rows = local_heads * head_dim
+    rest_shape = loaded_weight.shape[1:]
+    if loaded_weight.shape[0] != expected_rows or tuple(param.shape) != (
+        3 * local_rows,
+        *rest_shape,
+    ):
+        return False
+
+    head_start = tp_rank * local_heads
+    row_start = head_start * head_dim
+    row_stop = row_start + local_rows
+    target = param.data.view(3, local_rows, *rest_shape)
+    for index in range(3):
+        target[index].copy_(loaded_weight[index * qkv_rows + row_start : index * qkv_rows + row_stop])
+    return True
+
+
 def _norm(size: int, *, eps: float, dtype: torch.dtype = _BF16_DTYPE) -> nn.RMSNorm:
     # RMSNorm uses fp32 accumulation with bf16 inputs and outputs.
     # torch.nn.RMSNorm upcasts reduced-precision inputs for the variance
@@ -226,6 +271,26 @@ def _norm(size: int, *, eps: float, dtype: torch.dtype = _BF16_DTYPE) -> nn.RMSN
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     x1, x2 = torch.chunk(x, 2, dim=-1)
     return torch.cat((-x2, x1), dim=-1)
+
+
+def _apply_rope_split_half_cos_sin(
+    x: torch.Tensor,
+    cos_half: torch.Tensor,
+    sin_half: torch.Tensor,
+) -> torch.Tensor:
+    """Interleaved split-half RoPE matching Comfy ``rms_rope_split_half``."""
+    rot_dim = int(cos_half.shape[-1]) * 2
+    x_rot, x_pass = x[..., :rot_dim], x[..., rot_dim:]
+    half = int(cos_half.shape[-1])
+    paired = x_rot.reshape(*x_rot.shape[:-1], 2, half)
+    # cos_half/sin_half: [T, half] -> broadcast over heads.
+    c = cos_half.unsqueeze(-2)
+    s = sin_half.unsqueeze(-2)
+    x0, x1 = paired[..., 0, :], paired[..., 1, :]
+    out0 = c * x0 - s * x1
+    out1 = s * x0 + c * x1
+    rotated = torch.stack((out0, out1), dim=-2).reshape(*x_rot.shape[:-1], rot_dim)
+    return torch.cat((rotated, x_pass), dim=-1)
 
 
 def _modulate_scale_shift(
@@ -358,6 +423,47 @@ def _rope_cos_sin_cache(freqs: torch.Tensor, *, dtype: torch.dtype) -> torch.Ten
     )
 
 
+def _rope_rotation_table(freqs: torch.Tensor, *, dtype: torch.dtype) -> torch.Tensor:
+    """Comfy-compatible [1, S, 1, half, 2, 2] rotation matrices for split-half RoPE."""
+    half = freqs.shape[-1] // 2
+    ang = freqs[:, :half]
+    c, s = torch.cos(ang), torch.sin(ang)
+    return (
+        torch.stack([c, -s, s, c], dim=-1)
+        .reshape(1, freqs.shape[0], 1, half, 2, 2)
+        .to(dtype=dtype, copy=False)
+        .contiguous()
+    )
+
+
+def _apply_comfy_rms_rope_split_half(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    rot_table: torch.Tensor,
+    q_norm: nn.RMSNorm,
+    k_norm: nn.RMSNorm,
+    *,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply Comfy ``rms_rope_split_half_`` on packed [T, H, D] q/k tensors."""
+    import comfy_kitchen as ck
+
+    total, num_heads, head_dim = q.shape
+    q_view = q.view(1, total, num_heads, head_dim)
+    k_view = k.view(1, total, num_heads, head_dim)
+    rot_dim = int(rot_table.shape[-3]) * 2
+    ck.rms_rope_split_half_(
+        q_view,
+        k_view,
+        rot_table,
+        q_norm.weight,
+        k_norm.weight,
+        epsilon=eps,
+        rot_dim=rot_dim,
+    )
+    return q_view[0], k_view[0]
+
+
 def _apply_rope_cos_sin(
     x: torch.Tensor,
     cos: torch.Tensor,
@@ -376,14 +482,15 @@ def _apply_rope_qk(
     cos_sin_cache: torch.Tensor,
     positions: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    half = cos_sin_cache.shape[-1] // 2
+    cos_half, sin_half = cos_sin_cache.split(half, dim=-1)
+    if positions.numel() != cos_half.shape[0]:
+        cos_half = cos_half.index_select(0, positions.view(-1).to(torch.long))
+        sin_half = sin_half.index_select(0, positions.view(-1).to(torch.long))
     if not q.is_cuda:
-        half = cos_sin_cache.shape[-1] // 2
-        cos_half, sin_half = cos_sin_cache.split(half, dim=-1)
-        cos = torch.cat((cos_half, cos_half), dim=-1).unsqueeze(1)
-        sin = torch.cat((sin_half, sin_half), dim=-1).unsqueeze(1)
         return (
-            _apply_rope_cos_sin(q, cos, sin),
-            _apply_rope_cos_sin(k, cos, sin),
+            _apply_rope_split_half_cos_sin(q, cos_half, sin_half),
+            _apply_rope_split_half_cos_sin(k, cos_half, sin_half),
         )
 
     from sgl_kernel import rotary_embedding as apply_sgl_kernel_rotary_embedding
@@ -394,7 +501,7 @@ def _apply_rope_qk(
         k.view(k.shape[0], -1),
         q.shape[-1],
         cos_sin_cache,
-        True,
+        False,
     )
     return q, k
 
@@ -545,19 +652,6 @@ class MiniMaxH3Attention(nn.Module):
         self._install_qkv_weight_loader(arch)
         self.q_norm = _norm(arch.attention_head_dim, eps=arch.qk_norm_eps)
         self.k_norm = _norm(arch.attention_head_dim, eps=arch.qk_norm_eps)
-        # cache width covers cos/sin for temporal, height, and width frequencies
-        rope_dim = 6 * arch.rope_inv_freq_len
-        self._use_fused_qknorm_rope = (
-            current_platform.is_cuda()
-            and can_use_fused_inplace_qknorm_rope(
-                arch.attention_head_dim,
-                rope_dim,
-                True,
-                _BF16_DTYPE,
-                cache_dtype=_BF16_DTYPE,
-                round_norm_before_rope=True,
-            )
-        )
         self.out_proj = RowParallelLinear(
             self.inner_dim,
             arch.hidden_size,
@@ -583,10 +677,22 @@ class MiniMaxH3Attention(nn.Module):
         base_loader = weight.weight_loader
 
         def _weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
-            # The grouped checkpoint layout is
+            layout = getattr(arch, "qkv_checkpoint_layout", "grouped")
+            if layout == "flat":
+                if _copy_flat_qkv_tp_shard(
+                    param,
+                    loaded_weight,
+                    num_heads=arch.num_attention_heads,
+                    head_dim=arch.attention_head_dim,
+                    tp_rank=self.qkv_proj.tp_rank,
+                    tp_size=self.tp_size,
+                ):
+                    return
+                if self.tp_size == 1:
+                    base_loader(param, loaded_weight)
+                    return
+            # Grouped checkpoint layout:
             # [num_query_groups, q_per_group + k + v] before splitting.
-            # MiniMax H3 uses MHA, so checkpoint rows are per-head [q, k, v],
-            # while SGLang stores [q_all, k_all, v_all].
             if _copy_grouped_qkv_tp_shard(
                 param,
                 loaded_weight,
@@ -645,30 +751,15 @@ class MiniMaxH3Attention(nn.Module):
                 self.head_dim,
             )
         else:
-            cos_sin_cache, positions = rope_cache
-            if self._use_fused_qknorm_rope and not torch.compiler.is_compiling():
-                fused_inplace_qknorm_rope(
-                    q,
-                    k,
-                    self.q_norm.weight,
-                    self.k_norm.weight,
-                    cos_sin_cache,
-                    positions,
-                    is_neox=True,
-                    eps=self.q_norm.eps,
-                    head_dim=self.head_dim,
-                    rope_dim=cos_sin_cache.shape[-1],
-                    round_norm_before_rope=True,
-                )
-            else:
-                q, k = _apply_qk_norm(
-                    q,
-                    k,
-                    self.q_norm,
-                    self.k_norm,
-                    self.head_dim,
-                )
-                q, k = _apply_rope_qk(q, k, cos_sin_cache, positions)
+            rot_table, _positions = rope_cache
+            q, k = _apply_comfy_rms_rope_split_half(
+                q,
+                k,
+                rot_table,
+                self.q_norm,
+                self.k_norm,
+                eps=self.q_norm.eps,
+            )
 
         attention_core = (
             _minimax_h3_attention_core_bcg
@@ -758,17 +849,24 @@ class MiniMaxH3AdalnProj(nn.Module):
         self.expand_ratio = expand_ratio
         self.modality_num = modality_num
         self.hidden_size = arch.hidden_size
+        self.apply_silu = not arch.use_adaln_curve
+        adaln_input_dim = arch.adaln_input_dim
+        adaln_params_dtype = (
+            _FP32_DTYPE if arch.use_adaln_curve else _BF16_DTYPE
+        )
         self.linear = ColumnParallelLinear(
-            arch.time_embed_dim,
+            adaln_input_dim,
             out_features,
             bias=True,
             gather_output=False,
-            params_dtype=_BF16_DTYPE,
+            params_dtype=adaln_params_dtype,
             quant_config=quant_config,
             prefix=f"{prefix}.linear",
         )
 
     def project_local(self, adaln_input: torch.Tensor) -> torch.Tensor:
+        if self.apply_silu:
+            adaln_input = nn.functional.silu(adaln_input)
         x, _ = self.linear(adaln_input)
         return x
 
@@ -778,7 +876,7 @@ class MiniMaxH3AdalnProj(nn.Module):
         return tuple(x.chunk(self.expand_ratio, dim=-1))
 
     def forward(self, adaln_input: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        """adaln_input: SiLU(t_emb) BF16 -> expand_ratio tensors of [M*modality_num, H]."""
+        """adaln_input: curve coords or SiLU(t_emb) BF16 -> expand_ratio tensors."""
         x = self.project_local(adaln_input)
         if get_tp_world_size() > 1:
             x = tensor_model_parallel_all_gather(x)
@@ -1143,10 +1241,22 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             quant_config=quant_config,
             prefix="condition_proj",
         )
-        self.time_embedder = MiniMaxH3TimeEmbedder(
-            arch,
-            prefix="time_embedder",
-        )
+        if arch.use_adaln_curve:
+            self.time_embedder = None
+            self.register_buffer(
+                "adaln_t_table",
+                torch.empty(
+                    arch.adaln_curve_grid,
+                    arch.adaln_curve_dim,
+                    dtype=_FP32_DTYPE,
+                ),
+            )
+        else:
+            self.time_embedder = MiniMaxH3TimeEmbedder(
+                arch,
+                prefix="time_embedder",
+            )
+            self.adaln_t_table = None
         self.rope = MiniMaxH3Rope(arch.rope_inv_freq_len)
         self.token_refiner = MiniMaxH3TokenRefiner(
             arch,
@@ -1186,11 +1296,26 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         self._resolved_attention_backend = backend.get_enum()
 
     def _mark_missing_params_required(self) -> None:
-        for _, param in self.named_parameters():
-            param.missing_param_init = "error"
+        optional_prefixes: tuple[str, ...] = ()
+        if self.arch.use_adaln_curve:
+            optional_prefixes = ("time_embedder.",)
+        for name, param in self.named_parameters():
+            if optional_prefixes and name.startswith(optional_prefixes):
+                param.missing_param_init = "skip"
+            else:
+                param.missing_param_init = "error"
+
+    def _required_fp32_param_names(self) -> tuple[str, ...]:
+        if self.arch.use_adaln_curve:
+            return tuple(
+                name
+                for name in _MINIMAX_H3_FP32_PARAM_NAMES_IN_MODEL_ORDER
+                if not name.startswith("time_embedder.")
+            )
+        return _MINIMAX_H3_FP32_PARAM_NAMES_IN_MODEL_ORDER
 
     def post_load_weights(self) -> None:
-        for name in _MINIMAX_H3_FP32_PARAM_NAMES_IN_MODEL_ORDER:
+        for name in self._required_fp32_param_names():
             param = self.get_parameter(name)
             if param.dtype != _FP32_DTYPE:
                 raise ValueError(
@@ -1265,7 +1390,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         *,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Build request-static RoPE inputs for this Ulysses rank."""
+        """Build request-static Comfy-compatible RoPE inputs for this Ulysses rank."""
         if img_position_ids.dim() != 3 or img_position_ids.shape[0] != 1:
             raise ValueError(
                 "img_position_ids must be [1, S, 3], got "
@@ -1283,7 +1408,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             img_position_ids[:, row_start : row_start + local_seq_len]
         ).to(device)
         return (
-            _rope_cos_sin_cache(rope_freqs, dtype=_BF16_DTYPE),
+            _rope_rotation_table(rope_freqs, dtype=_BF16_DTYPE),
             torch.arange(
                 local_seq_len,
                 device=device,
@@ -1439,7 +1564,11 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
                 audio_embed.to(_BF16_DTYPE),
             )
 
-        t_emb = self.time_embedder(unique_timesteps)
+        t_emb = (
+            interpolate_adaln_t_table(self.adaln_t_table, unique_timesteps)
+            if self.arch.use_adaln_curve
+            else self.time_embedder(unique_timesteps)
+        )
         return embeddings, t_emb
 
     def forward(self, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1559,7 +1688,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         if rope_cache is None:
             rope_freqs = self.rope(img_position_ids[:, row_start:row_stop]).to(device)
             rope_cache = (
-                _rope_cos_sin_cache(rope_freqs, dtype=_BF16_DTYPE),
+                _rope_rotation_table(rope_freqs, dtype=_BF16_DTYPE),
                 torch.arange(
                     local_seq_len,
                     device=device,
@@ -1586,8 +1715,9 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             refined_prompt_embeds_length=kwargs.get("refined_prompt_embeds_length"),
             local_embedding_layout=kwargs.get("local_embedding_layout"),
         )
-        # request-step AdaLN input shared by all blocks
-        adaln_input = nn.functional.silu(t_emb).to(_BF16_DTYPE)
+        # request-step AdaLN input shared by all blocks; SiLU (when enabled) is
+        # applied inside each adaln_proj to match ComfyUI's AdalnProj contract.
+        adaln_input = t_emb
         inverse_indices = inverse_indices.to(device)
         block_inverse = inverse_indices[row_start:row_stop]
         if block_token_tags is None:
@@ -1612,6 +1742,16 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         hidden = decoder_input
         cu_seqlens = cu_seqlens.to(device)
         block_adaln_params = None
+        if os.environ.get("MINIMAX_H3_DEBUG_BLOCK_HOOK") == "1":
+            dump_dir = os.environ.get(
+                "MINIMAX_H3_DEBUG_BLOCK_DIR",
+                "/data/H3/logs/h3_sglang_blocks",
+            )
+            os.makedirs(dump_dir, exist_ok=True)
+            torch.save(
+                hidden.detach().cpu(),
+                os.path.join(dump_dir, "embed.pt"),
+            )
         if self._can_batch_block_adaln():
             local_adaln = torch.stack(
                 [block.adaln_proj.project_local(adaln_input) for block in self.blocks]
@@ -1638,6 +1778,16 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
                     None if block_adaln_params is None else block_adaln_params[index]
                 ),
             )
+            if os.environ.get("MINIMAX_H3_DEBUG_BLOCK_HOOK") == "1":
+                dump_dir = os.environ.get(
+                    "MINIMAX_H3_DEBUG_BLOCK_DIR",
+                    "/data/H3/logs/h3_sglang_blocks",
+                )
+                os.makedirs(dump_dir, exist_ok=True)
+                torch.save(
+                    hidden.detach().cpu(),
+                    os.path.join(dump_dir, f"block_{index:02d}.pt"),
+                )
         video_logits, audio_logits = self.final_layer(
             hidden,
             adaln_input=adaln_input,

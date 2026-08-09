@@ -254,6 +254,9 @@ class ServerArgs(DisaggServerArgsMixin):
 
     # Component path overrides (key = model_index.json component name, value = path)
     component_paths: dict[str, str] = field(default_factory=dict)
+    # When a component_paths entry is a single .safetensors file, config is read
+    # from the repository subfolder and weights are loaded from this map instead.
+    component_weights_paths: dict[str, str] = field(default_factory=dict)
 
     # path to pre-quantized transformer weights (single .safetensors or directory).
     transformer_weights_path: str | None = None

@@ -2,7 +2,10 @@
 import os
 from dataclasses import dataclass, field
 
-from sglang.multimodal_gen.configs.models.dits.minimax_h3 import MiniMaxH3DiTConfig
+from sglang.multimodal_gen.configs.models.dits.minimax_h3 import (
+    MiniMaxH3DiTArchConfig,
+    MiniMaxH3DiTConfig,
+)
 from sglang.multimodal_gen.configs.models.encoders.minimax_h3_qwen3vl import (
     MiniMaxH3Qwen3VLConfig,
 )
@@ -75,6 +78,30 @@ class MiniMaxH3PipelineConfig(PipelineConfig):
             speed_mode_enable_torch_compile_by_default=False,
             keep_resident_min_available_gb=120,
             keep_resident_components=("dit", "text_encoder", "vae"),
+            auto_enable_cfg_parallel=False,
+            supports_cfg_parallel=False,
+        )
+
+
+@dataclass
+class MiniMaxH3ComfyQuant4090PipelineConfig(MiniMaxH3PipelineConfig):
+    """MiniMax H3 profile for Comfy pruned+quantized checkpoints on 24GB GPUs."""
+
+    dit_config: MiniMaxH3DiTConfig = field(
+        default_factory=lambda: MiniMaxH3DiTConfig(
+            arch_config=MiniMaxH3DiTArchConfig(
+                adaln_curve_grid=1025,
+                adaln_curve_dim=8,
+            )
+        )
+    )
+
+    def get_model_deployment_config(self) -> ModelDeploymentConfig:
+        return ModelDeploymentConfig(
+            speed_mode_enable_torch_compile_by_default=False,
+            auto_dit_layerwise_offload=True,
+            keep_resident_min_available_gb=20,
+            keep_resident_components=("vae",),
             auto_enable_cfg_parallel=False,
             supports_cfg_parallel=False,
         )
@@ -188,4 +215,4 @@ class MiniMaxH3PipelineConfig(PipelineConfig):
         return safetensors_list
 
 
-__all__ = ["MiniMaxH3PipelineConfig"]
+__all__ = ["MiniMaxH3ComfyQuant4090PipelineConfig", "MiniMaxH3PipelineConfig"]
