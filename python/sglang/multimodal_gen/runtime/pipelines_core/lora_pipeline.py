@@ -4,7 +4,7 @@
 import json
 import os
 from collections import defaultdict
-from collections.abc import Hashable
+from collections.abc import Hashable, Iterable
 from contextlib import contextmanager, nullcontext
 from typing import Any
 
@@ -53,6 +53,57 @@ def _swap_peft_swiglu_fc1_lora_b(
         return weight
     value, gate = weight.chunk(2, dim=0)
     return torch.cat([gate, value], dim=0)
+
+
+def convert_peft_lora_named_tensors(
+    named_tensors: Iterable[tuple[str, torch.Tensor]],
+    *,
+    param_names_mapping: dict | None = None,
+    lora_param_names_mapping: dict | None = None,
+) -> list[tuple[str, torch.Tensor]]:
+    """Map PEFT/HF LoRA tensors onto native DiT names, stacking fused layers.
+
+    Shared by disk ``load_lora_adapter`` and IPC ``WeightsUpdater`` so a
+    training-side PEFT payload does not need a second, trainer-local convert.
+    """
+    param_names_mapping_fn = get_param_names_mapping(param_names_mapping or {})
+    lora_param_names_mapping_fn = get_param_names_mapping(
+        lora_param_names_mapping or {}
+    )
+    to_merge_params: defaultdict[Hashable, dict[Any, Any]] = defaultdict(dict)
+    converted: list[tuple[str, torch.Tensor]] = []
+
+    for raw_name, weight in named_tensors:
+        name = raw_name.replace("diffusion_model.", "")
+        name = name.replace(".weight", "")
+        # misc-format -> HF-format
+        name, _, _ = lora_param_names_mapping_fn(name)
+        source_name = name
+        # HF-format (LoRA) -> SGLang-dit-format
+        target_name, merge_index, num_params_to_merge = param_names_mapping_fn(name)
+        # for fuse B(out_dim, r) @ A(r, in_dim) -> (N, out_dim, r) @ (N, r, in_dim)
+        if merge_index is not None:
+            to_merge_params[target_name][merge_index] = weight
+            if len(to_merge_params[target_name]) == num_params_to_merge:
+                sorted_tensors = [
+                    to_merge_params[target_name][i]
+                    for i in range(num_params_to_merge)
+                ]
+                # Use stack instead of cat because it needs to be compatible with TP.
+                weight = torch.stack(sorted_tensors, dim=0)
+                del to_merge_params[target_name]
+            else:
+                continue
+
+        weight = _swap_peft_swiglu_fc1_lora_b(source_name, target_name, weight)
+        converted.append((target_name, weight))
+
+    if to_merge_params:
+        leftover = sorted(str(name) for name in to_merge_params)
+        logger.warning(
+            "Incomplete fused LoRA groups after mapping (dropped): %s", leftover[:5]
+        )
+    return converted
 
 
 class LoRAPipeline(ComposedPipelineBase):
@@ -758,40 +809,18 @@ class LoRAPipeline(ComposedPipelineBase):
             self.lora_adapters[lora_nickname].clear()
 
         config = self.server_args.pipeline_config.dit_config.arch_config
-
-        param_names_mapping_fn = get_param_names_mapping(
-            config.param_names_mapping
-            or self.modules["transformer"].param_names_mapping
+        converted = convert_peft_lora_named_tensors(
+            lora_state_dict.items(),
+            param_names_mapping=(
+                config.param_names_mapping
+                or self.modules["transformer"].param_names_mapping
+            ),
+            lora_param_names_mapping=(
+                config.lora_param_names_mapping
+                or self.modules["transformer"].lora_param_names_mapping
+            ),
         )
-        lora_param_names_mapping_fn = get_param_names_mapping(
-            config.lora_param_names_mapping
-            or self.modules["transformer"].lora_param_names_mapping
-        )
-
-        to_merge_params: defaultdict[Hashable, dict[Any, Any]] = defaultdict(dict)
-        for name, weight in lora_state_dict.items():
-            name = name.replace("diffusion_model.", "")
-            name = name.replace(".weight", "")
-            # misc-format -> HF-format
-            name, _, _ = lora_param_names_mapping_fn(name)
-            # HF-format (LoRA) -> SGLang-dit-format
-            target_name, merge_index, num_params_to_merge = param_names_mapping_fn(name)
-            # for fuse B(out_dim, r) @ A(r, in_dim) -> (N, out_dim, r) @ (N, r, in_dim)
-            # see param mapping in HunyuanVideoArchConfig
-            if merge_index is not None:
-                to_merge_params[target_name][merge_index] = weight
-                if len(to_merge_params[target_name]) == num_params_to_merge:
-                    sorted_tensors = [
-                        to_merge_params[target_name][i]
-                        for i in range(num_params_to_merge)
-                    ]
-                    # Use stack instead of cat because it needs to be compatible with TP.
-                    weight = torch.stack(sorted_tensors, dim=0)
-                    del to_merge_params[target_name]
-                else:
-                    continue
-
-            weight = _swap_peft_swiglu_fc1_lora_b(name, target_name, weight)
+        for target_name, weight in converted:
             if target_name in self.lora_adapters[lora_nickname]:
                 raise ValueError(
                     f"Dit target weight name {target_name} already exists in lora_adapters[{lora_nickname}]"

@@ -58,7 +58,10 @@ from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload im
     is_layerwise_offloaded_module,
 )
 from sglang.multimodal_gen.runtime.pipelines.diffusers_pipeline import DiffusersPipeline
-from sglang.multimodal_gen.runtime.pipelines_core.lora_pipeline import LoRAPipeline
+from sglang.multimodal_gen.runtime.pipelines_core.lora_pipeline import (
+    LoRAPipeline,
+    convert_peft_lora_named_tensors,
+)
 from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import maybe_download_model
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.srt.weight_sync.tensor_bucket import (
@@ -87,6 +90,30 @@ def _get_lora_layer_dict(
         f"Unsupported LoRA IPC target_module={target_module!r}; "
         f"expected one of {sorted(_LORA_IPC_TARGET_MODULES)}"
     )
+
+
+def _lora_convert_mappings(
+    pipeline, dit_module: torch.nn.Module | None = None
+) -> dict[str, dict]:
+    """Prefer the pipeline arch mapping (disk LoRA path), then the DiT module."""
+    mapping: dict = {}
+    lora_mapping: dict = {}
+    if dit_module is not None:
+        mapping = getattr(dit_module, "param_names_mapping", None) or {}
+        lora_mapping = getattr(dit_module, "lora_param_names_mapping", None) or {}
+    arch = getattr(
+        getattr(getattr(pipeline, "server_args", None), "pipeline_config", None),
+        "dit_config",
+        None,
+    )
+    arch = getattr(arch, "arch_config", None)
+    if arch is not None:
+        mapping = getattr(arch, "param_names_mapping", None) or mapping
+        lora_mapping = getattr(arch, "lora_param_names_mapping", None) or lora_mapping
+    return {
+        "param_names_mapping": mapping,
+        "lora_param_names_mapping": lora_mapping,
+    }
 
 
 def _group_lora_ab_tensors(
@@ -586,12 +613,20 @@ class WeightsUpdater:
             logger.error(str(e))
             return False, str(e)
 
+        dit_module = dict(modules_to_update).get(target_module)
+        if dit_module is None:
+            return False, f"No DiT module found for LoRA IPC target {target_module!r}"
+
         materialized: list[tuple[str, torch.Tensor]] = []
         for module_name, _module in modules_to_update:
             payload = module_payloads[module_name]
             weights_iter = self._materialize_weights_iter(payload, load_format)
             materialized.extend(list(weights_iter))
 
+        materialized = convert_peft_lora_named_tensors(
+            materialized,
+            **_lora_convert_mappings(self.pipeline, dit_module=dit_module),
+        )
         pairs = _group_lora_ab_tensors(materialized)
         if not pairs:
             return False, "No LoRA A/B tensor pairs found in payload"
@@ -621,10 +656,6 @@ class WeightsUpdater:
             logger.error(str(e))
             return False, str(e)
 
-        dit_module = dict(modules_to_update).get(target_module)
-        if dit_module is None:
-            return False, f"No DiT module found for LoRA IPC target {target_module!r}"
-
         updated = 0
         skipped = 0
         unknown_layers: list[str] = []
@@ -642,7 +673,11 @@ class WeightsUpdater:
                     unknown_layers.append(layer_name)
                     skipped += 1
                     continue
-                inferred_rank = int(lora_a.shape[0])
+                # Stacked adapters for fused layers carry a leading section axis
+                # (e.g. [3, rank, in] for Q/K/V); shape[0] would be the section count.
+                inferred_rank = int(
+                    lora_a.shape[-2] if lora_a.dim() > 2 else lora_a.shape[0]
+                )
                 alpha = lora_alpha if lora_alpha is not None else inferred_rank
                 if lora_rank is not None and lora_rank != inferred_rank:
                     logger.warning(
