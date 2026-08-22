@@ -4,6 +4,7 @@
 from dataclasses import dataclass, field
 
 from sglang.multimodal_gen.configs.models.dits.base import DiTArchConfig, DiTConfig
+from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 
 
 def _build_cosmos3_param_names_mapping(gated_mlp: bool = True) -> dict:
@@ -216,6 +217,9 @@ class Cosmos3VideoArchConfig(DiTArchConfig):
         # The MLP weight layout depends on the activation, which the checkpoint
         # may override; rebuild the mapping after arch values are applied.
         self.param_names_mapping = _build_cosmos3_param_names_mapping(self.gated_mlp)
+        self._supported_attention_backends = set(
+            self._supported_attention_backends
+        ) | {AttentionBackendEnum.SOL_ATTN}
 
 
 @dataclass

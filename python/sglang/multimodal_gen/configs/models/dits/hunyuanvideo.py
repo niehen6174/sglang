@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import torch
 
 from sglang.multimodal_gen.configs.models.dits.base import DiTArchConfig, DiTConfig
+from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 
 
 @dataclass
@@ -151,6 +152,9 @@ class HunyuanVideoArchConfig(DiTArchConfig):
         super().__post_init__()
         self.hidden_size: int = self.attention_head_dim * self.num_attention_heads
         self.num_channels_latents: int = self.in_channels
+        self._supported_attention_backends = set(
+            self._supported_attention_backends
+        ) | {AttentionBackendEnum.SOL_ATTN}
 
 
 @dataclass

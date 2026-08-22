@@ -329,6 +329,7 @@ class ZImageAttention(nn.Module):
             dropout_rate=0,
             softmax_scale=None,
             causal=False,
+            prefix=f"{prefix}.attn",
         )
 
     def forward(

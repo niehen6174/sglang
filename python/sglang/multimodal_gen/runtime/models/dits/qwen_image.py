@@ -656,7 +656,9 @@ class QwenImageCrossAttention(nn.Module):
                 AttentionBackendEnum.TORCH_SDPA,
                 AttentionBackendEnum.SAGE_ATTN,
                 AttentionBackendEnum.SAGE_ATTN_3,
+                AttentionBackendEnum.SOL_ATTN,
             },
+            prefix=f"{prefix}.attn",
         )
 
     def forward(

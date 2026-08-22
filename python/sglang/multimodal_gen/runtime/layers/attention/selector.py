@@ -325,14 +325,29 @@ def _cached_get_attn_backend(
     elif selected_backend is not None and not _is_backend_supported(
         selected_backend, supported_attention_backends
     ):
+        # Some layers intentionally restrict backends (e.g. LTX2
+        # video_to_audio cross-attn requires torch_sdpa; Wan cross-attn
+        # excludes sparse backends). Prefer the layer constraint over a
+        # component/global override instead of failing init.
         supported_attention_backends_str = [
             supported_attention_backend.__str__()
             for supported_attention_backend in supported_attention_backends
         ]
-        raise ValueError(
-            f"Attention backend '{selected_backend}' is not supported by this "
-            f"attention layer; supported backends: {supported_attention_backends_str}"
-        )
+        if len(supported_attention_backends) == 1:
+            layer_backend = next(iter(supported_attention_backends))
+            logger.debug(
+                "Component requested %s but layer only supports %s; using layer backend",
+                selected_backend,
+                layer_backend,
+            )
+            selected_backend = layer_backend
+        else:
+            logger.debug(
+                "Component requested %s but layer only supports %s; auto-selecting",
+                selected_backend,
+                supported_attention_backends_str,
+            )
+            selected_backend = None
 
     attention_cls = current_platform.get_attn_backend_cls_str(
         selected_backend, head_size, dtype

@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from sglang.multimodal_gen.configs.models.dits.base import DiTArchConfig, DiTConfig
+from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 
 
 class LTXModelType(Enum):
@@ -180,6 +181,9 @@ class LTX2ArchConfig(DiTArchConfig):
         )
         if self.audio_positional_embedding_max_pos is None:
             self.audio_positional_embedding_max_pos = [20]
+        self._supported_attention_backends = set(
+            self._supported_attention_backends
+        ) | {AttentionBackendEnum.SOL_ATTN}
 
 
 @dataclass

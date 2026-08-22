@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Tuple
 
 from sglang.multimodal_gen.configs.models.dits.base import DiTArchConfig, DiTConfig
+from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 
 
 @dataclass
@@ -89,6 +90,9 @@ class ZImageArchConfig(DiTArchConfig):
         self.out_channels = self.out_channels or self.in_channels
         self.num_channels_latents = self.in_channels
         self.hidden_size = self.dim
+        self._supported_attention_backends = set(
+            self._supported_attention_backends
+        ) | {AttentionBackendEnum.SOL_ATTN}
 
 
 @dataclass

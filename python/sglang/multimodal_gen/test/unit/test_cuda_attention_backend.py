@@ -142,16 +142,34 @@ class TestCudaAttentionBackendSelection(unittest.TestCase):
                 AttentionBackendEnum.FA,
             )
 
-    def test_explicit_backend_rejected_by_a_model_fails_closed(self):
-        with self.assertRaisesRegex(
-            ValueError, "not supported by this attention layer"
+    def test_component_override_falls_back_to_single_layer_backend(self):
+        with patch(
+            "sglang.multimodal_gen.runtime.platforms.current_platform",
+            FakeCudaPlatform,
         ):
-            _cached_get_attn_backend(
+            backend_cls = _cached_get_attn_backend(
                 128,
                 torch.float16,
-                (AttentionBackendEnum.FA,),
-                AttentionBackendEnum.SAGE_ATTN,
+                (AttentionBackendEnum.TORCH_SDPA,),
+                AttentionBackendEnum.SOL_ATTN,
             )
+        self.assertEqual(backend_cls.get_enum(), AttentionBackendEnum.TORCH_SDPA)
+
+    def test_component_override_falls_back_to_auto_for_multi_backend_layers(self):
+        with patch(
+            "sglang.multimodal_gen.runtime.platforms.current_platform",
+            FakeCudaPlatform,
+        ):
+            backend_cls = _cached_get_attn_backend(
+                128,
+                torch.float16,
+                (
+                    AttentionBackendEnum.FA,
+                    AttentionBackendEnum.TORCH_SDPA,
+                ),
+                AttentionBackendEnum.SOL_ATTN,
+            )
+        self.assertEqual(backend_cls.get_enum(), AttentionBackendEnum.FA)
 
 
 if __name__ == "__main__":
