@@ -3019,19 +3019,22 @@ def refresh_layerwise_targets(module: torch.nn.Module) -> None:
 
 
 def _refresh_packed_from_manager(layer: torch.nn.Module) -> None:
-    """Re-bind ``_packed_weight_cpu`` after the manager store is replaced."""
+    """Re-bind CPU packed views after the manager store is replaced."""
     root = getattr(layer, "_offload_root", None)
     prefix = getattr(layer, "_offload_param_prefix", None)
     if root is None or prefix is None:
         return
-    name = f"{prefix}.weight"
     for manager in getattr(root, "layerwise_offload_managers", None) or []:
         getter = getattr(manager, "get_cpu_weight", None)
         if not callable(getter):
             continue
-        tensor = getter(name)
-        if tensor is not None:
-            layer._packed_weight_cpu = tensor.detach()
+        weight = getter(f"{prefix}.weight")
+        if weight is not None:
+            layer._packed_weight_cpu = weight.detach()
+        scale = getter(f"{prefix}.weight_scale")
+        if scale is not None:
+            layer._packed_scale_cpu = scale.detach()
+        if weight is not None:
             return
 
 
@@ -3102,6 +3105,7 @@ def write_offload_params(
             f"layerwise LoRA writeback missed {missing} (prefix={prefix})"
         )
     _refresh_packed_from_manager(layer)
+    _release_stale_gpu_layer(layer)
     return True
 
 
@@ -3116,7 +3120,6 @@ def write_dense_weight(layer: torch.nn.Module, weight: torch.Tensor) -> None:
     if hasattr(dest, "to_local"):
         dest = dest.to_local()
     if write_offload_params(layer, {"weight": weight}):
-        _release_stale_gpu_layer(layer)
         return
     packed_view = getattr(layer, "_packed_weight_cpu", None)
     if copy_into_packed_view(packed_view, weight):
