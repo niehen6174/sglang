@@ -40,6 +40,14 @@ from sglang.multimodal_gen.runtime.utils.precision import get_mixed_precision_st
 torch._dynamo.config.recompile_limit = 64
 
 
+def _lora_quant_roundtrip(layer: nn.Module):
+    """Quant method that must merge in the original (unrotated) dense space."""
+    method = getattr(layer, "quant_method", None)
+    if method is None or not getattr(method, "lora_merge_in_original_space", False):
+        return None
+    return method
+
+
 LORA_MERGE_CHUNK_BYTES = 32 * 1024 * 1024
 LoRAWeightEntry = tuple[
     torch.nn.Parameter,
@@ -91,12 +99,15 @@ class BaseLayerWithLoRA(nn.Module):
         # valid only while every merge on this layer is a copy-merge (the
         # merged-store path), which never writes the base storage. H3's DiT
         # backup alone is 38 GB of anonymous memory under clone().
-        if snapshot_base:
-            self.cpu_weight = base_layer.weight.detach().to("cpu").clone()
-            self._base_is_view = False
-        else:
-            self.cpu_weight = base_layer.weight.detach()
-            self._base_is_view = True
+        # Kitchen INT8 snapshots packed I8 + scale; BF16 snapshots dense W.
+        self._lora_backup = None
+        if not self.bind_quant_base_snapshot(clone=snapshot_base):
+            if snapshot_base:
+                self.cpu_weight = base_layer.weight.detach().to("cpu").clone()
+                self._base_is_view = False
+            else:
+                self.cpu_weight = base_layer.weight.detach()
+                self._base_is_view = True
         # indicates adapter weights don't contain this layer
         # (which shouldn't normally happen, but we want to separate it from the case of erroneous merging)
         # Default to True to prevent using uninitialized weights; set to False when weights are loaded
@@ -121,8 +132,18 @@ class BaseLayerWithLoRA(nn.Module):
         return getattr(self.base_layer, "bias", None)
 
     @property
+    def quant_method(self):
+        return getattr(self.base_layer, "quant_method", None)
+
+    @property
+    def quant_config(self):
+        return getattr(self.base_layer, "quant_config", None)
+
+    @property
     def can_merge_base_weight(self) -> bool:
         """Whether a LoRA delta may safely replace the stored base weight."""
+        if _lora_quant_roundtrip(self.base_layer) is not None:
+            return True
         weight = self.weight
         if not (weight.dtype.is_floating_point or weight.dtype.is_complex):
             return False
@@ -324,12 +345,36 @@ class BaseLayerWithLoRA(nn.Module):
             return packed, torch.device("cpu")
         return weight, weight.device
 
+    def bind_quant_base_snapshot(self, *, clone: bool) -> bool:
+        """Re-snapshot packed INT8 after layerwise CPU views are bound."""
+        method = _lora_quant_roundtrip(self.base_layer)
+        if method is None:
+            return False
+        self._lora_backup = method.snapshot_for_lora(self.base_layer, clone=clone)
+        self.cpu_weight = self._lora_backup["weight"]
+        self._base_is_view = not clone
+        return True
+
     def _ensure_base_snapshot_owned(self) -> None:
         """An in-place merge is about to write the base storage; if the
         snapshot is a zero-copy view into it, materialize the clone now."""
         if self._base_is_view:
             self.cpu_weight = self.cpu_weight.clone()
             self._base_is_view = False
+
+    def _dense_src_for_merge(self) -> torch.Tensor:
+        method = _lora_quant_roundtrip(self.base_layer)
+        if method is not None:
+            return method.to_dense_weight(self.base_layer, get_local_torch_device())
+        src, _ = self._materialized_weight_src()
+        return src.to(get_local_torch_device())
+
+    def _write_merged_weight(self, merged: torch.Tensor) -> None:
+        method = _lora_quant_roundtrip(self.base_layer)
+        if method is not None:
+            method.from_dense_weight(self.base_layer, merged)
+            return
+        write_dense_weight(self.base_layer, merged)
 
     @torch.no_grad()
     def _merge_lora_into_data(
@@ -481,6 +526,11 @@ class BaseLayerWithLoRA(nn.Module):
         lora_list = self._active_lora_list()
         if not lora_list:
             raise ValueError("LoRA weights not set. Please set them first.")
+        method = _lora_quant_roundtrip(self.base_layer)
+        if method is not None and isinstance(self.base_layer.weight, DTensor):
+            raise ValueError(
+                "LoRA merge into kitchen_int8 is not supported under FSDP/DTensor."
+            )
         if isinstance(self.base_layer.weight, DTensor) and any(
             output_offset is not None for *_, output_offset in lora_list
         ):
@@ -542,9 +592,9 @@ class BaseLayerWithLoRA(nn.Module):
                 offload_policy=offload_policy,
             )
         else:
-            src, _ = self._materialized_weight_src()
-            data = src.to(get_local_torch_device())
-            self._merge_from_device_data(data, lora_list, merge_in_fp32)
+            self._merge_from_device_data(
+                self._dense_src_for_merge(), lora_list, merge_in_fp32
+            )
             return
 
         self.merged = True
@@ -562,12 +612,15 @@ class BaseLayerWithLoRA(nn.Module):
         if merge_in_fp32 is None:
             merge_in_fp32 = self._should_merge_in_fp32(lora_list)
         data = self._as_mutable_tensor(data)
+        if data.dtype == torch.int8:
+            raise RuntimeError(
+                "LoRA merge cannot add into INT8 weights; dequantize first."
+            )
         target_dtype = data.dtype
         if merge_in_fp32 and data.is_floating_point() and data.dtype != torch.float32:
             data = data.to(torch.float32)
         self._merge_lora_into_data(data, lora_list)
-        merged = self._as_mutable_tensor(data.to(dtype=target_dtype))
-        write_dense_weight(self.base_layer, merged)
+        self._write_merged_weight(self._as_mutable_tensor(data.to(dtype=target_dtype)))
         self.merged = True
 
     @torch.no_grad()
@@ -581,6 +634,7 @@ class BaseLayerWithLoRA(nn.Module):
             )
 
         # avoid precision loss
+        method = _lora_quant_roundtrip(self.base_layer)
         if isinstance(self.base_layer.weight, DTensor):
             device = self.base_layer.weight.data.device
             old_weight = self.base_layer.weight
@@ -591,6 +645,8 @@ class BaseLayerWithLoRA(nn.Module):
             del old_weight
         elif self._base_is_view:
             self._unmerge_by_inverse()
+        elif method is not None:
+            method.restore_for_lora(self.base_layer, self._lora_backup)
         else:
             current_device = self.base_layer.weight.data.device
             cpu_weight_on_device = self.cpu_weight.to(current_device, non_blocking=True)
@@ -615,8 +671,7 @@ class BaseLayerWithLoRA(nn.Module):
             raise ValueError(
                 "LoRA weights not set; cannot unmerge a zero-copy view by inverse."
             )
-        src, current_device = self._materialized_weight_src()
-        data = self._as_mutable_tensor(src.to(get_local_torch_device()))
+        data = self._as_mutable_tensor(self._dense_src_for_merge())
         target_dtype = data.dtype
         if (
             self._should_merge_in_fp32(lora_list)
@@ -625,7 +680,15 @@ class BaseLayerWithLoRA(nn.Module):
         ):
             data = data.to(torch.float32)
         inverted = [
-            (lora_A, lora_B, lora_path, -lora_strength, lora_rank, lora_alpha)
+            (
+                lora_A,
+                lora_B,
+                lora_path,
+                -lora_strength,
+                lora_rank,
+                lora_alpha,
+                output_offset,
+            )
             for (
                 lora_A,
                 lora_B,
@@ -633,13 +696,11 @@ class BaseLayerWithLoRA(nn.Module):
                 lora_strength,
                 lora_rank,
                 lora_alpha,
+                output_offset,
             ) in reversed(lora_list)
         ]
         self._merge_lora_into_data(data, inverted)
-        write_dense_weight(
-            self.base_layer,
-            self._as_mutable_tensor(data.to(dtype=target_dtype)),
-        )
+        self._write_merged_weight(self._as_mutable_tensor(data.to(dtype=target_dtype)))
 
     @torch.no_grad()
     def commit_merged_as_base(self) -> None:
@@ -657,11 +718,12 @@ class BaseLayerWithLoRA(nn.Module):
                 "A LoRA with a constant output offset cannot be committed as a "
                 "weight-only base."
             )
-        weight = self.base_layer.weight
-        if isinstance(weight, DTensor):
-            weight = weight.to_local()
-        # clone(): to("cpu") may alias storage; we must not mutate this backup.
-        self.cpu_weight = weight.detach().to("cpu").clone()
+        if not self.bind_quant_base_snapshot(clone=True):
+            weight = self.base_layer.weight
+            if isinstance(weight, DTensor):
+                weight = weight.to_local()
+            # clone(): to("cpu") may alias storage; we must not mutate this backup.
+            self.cpu_weight = weight.detach().to("cpu").clone()
         self.merged = False
         self.disable_lora = True
         self.lora_weights_list = []
