@@ -11,6 +11,9 @@ dequantization and bias add without ever materializing the intermediates.
 The online path applies data-free group-wise Hadamard rotation and per-output
 channel scaling after loading a stock BF16 checkpoint. Compatible serialized
 Comfy checkpoints instead load their INT8 weights and row scales directly.
+
+LoRA merge uses the same convert/set contract as ComfyUI: dequantize (undo
+ConvRot) into the original BF16 space, add ``B @ A``, then requantize.
 """
 
 from __future__ import annotations
@@ -23,6 +26,10 @@ from torch.nn.parameter import Parameter
 from sglang.multimodal_gen.runtime.layers.linear import LinearMethodBase
 from sglang.multimodal_gen.runtime.layers.quantization.configs.kitchen_int8_config import (
     KitchenInt8Config,
+)
+from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload import (
+    is_offload_placeholder,
+    write_offload_params,
 )
 from sglang.multimodal_gen.runtime.utils.weight_attrs import set_weight_attrs
 
@@ -71,8 +78,25 @@ def _load_comfy_kitchen():
         )
 
 
+def _assign_parameter(layer: torch.nn.Module, name: str, data: torch.Tensor) -> None:
+    existing = getattr(layer, name, None)
+    param = Parameter(data, requires_grad=False)
+    if (
+        isinstance(existing, Parameter)
+        and existing.shape == data.shape
+        and existing.dtype == data.dtype
+        and existing.device == data.device
+        and not existing.data.is_inference()
+    ):
+        existing.data.copy_(data)
+        return
+    layer.register_parameter(name, param)
+
+
 class KitchenInt8LinearMethod(LinearMethodBase):
     """Loads or creates ConvRot INT8 weights and runs the fused kernel."""
+
+    lora_merge_in_original_space = True
 
     def __init__(
         self,
@@ -138,12 +162,29 @@ class KitchenInt8LinearMethod(LinearMethodBase):
         if self.is_checkpoint_serialized or weight.dtype == torch.int8:
             return
 
+        # Quantize one layer at a time on CUDA. The loader must not move the
+        # whole DiT onto the card first — that OOMs a 24GB GPU.
+        layer._kitchen_dense_dtype = weight.dtype
+        home = weight.device
+        qdata, scale = self._quantize_dense(weight, home)
+        layer.weight = Parameter(qdata, requires_grad=False)
+        layer.register_parameter("weight_scale", Parameter(scale, requires_grad=False))
+        self.quant_config.note_quantized(weight.numel() * weight.element_size())
+        del qdata, scale
+        torch.cuda.empty_cache()
+
+    def _dense_dtype(self, layer: torch.nn.Module) -> torch.dtype:
+        return getattr(
+            layer,
+            "_kitchen_dense_dtype",
+            getattr(layer, "params_dtype", torch.bfloat16),
+        )
+
+    def _quantize_dense(
+        self, weight: torch.Tensor, home: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         from comfy_kitchen.tensor.int8 import TensorWiseINT8Layout
 
-        # Quantization runs on CUDA, but the model may still be staged on CPU
-        # for offload. Round-trip one layer at a time rather than relying on
-        # the loader's whole-model device move, which would not fit in VRAM.
-        home = weight.device
         qdata, params = TensorWiseINT8Layout.quantize(
             weight.to("cuda", non_blocking=True),
             is_weight=True,
@@ -152,16 +193,125 @@ class KitchenInt8LinearMethod(LinearMethodBase):
             convrot_groupsize=self.group_size,
             stochastic_rounding=0,
         )
-        layer.weight = Parameter(qdata.to(home), requires_grad=False)
-        layer.register_parameter(
-            "weight_scale",
-            Parameter(
-                params.scale.to(device=home, dtype=torch.float32), requires_grad=False
-            ),
+        return qdata.to(home), params.scale.to(device=home, dtype=torch.float32)
+
+    def _install_packed(
+        self,
+        layer: torch.nn.Module,
+        qdata: torch.Tensor,
+        scale: torch.Tensor | None,
+    ) -> None:
+        packed = {"weight": qdata.detach().to("cpu").contiguous()}
+        if scale is not None:
+            packed["weight_scale"] = (
+                scale.detach().to("cpu", dtype=torch.float32).contiguous()
+            )
+        layer._packed_weight_cpu = packed["weight"]
+        if "weight_scale" in packed:
+            layer._packed_scale_cpu = packed["weight_scale"]
+        if write_offload_params(layer, packed):
+            return
+        home = layer.weight.device
+        _assign_parameter(layer, "weight", qdata.to(home))
+        if scale is not None:
+            _assign_parameter(layer, "weight_scale", scale.to(home))
+
+    def _packed_int8_and_scale(
+        self, layer: torch.nn.Module
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        packed = getattr(layer, "_packed_weight_cpu", None)
+        if (
+            packed is None
+            or is_offload_placeholder(packed)
+            or packed.dtype != torch.int8
+        ):
+            return None
+        scale = getattr(layer, "_packed_scale_cpu", None)
+        if scale is None or is_offload_placeholder(scale):
+            live = getattr(layer, "weight_scale", None)
+            if live is not None and not is_offload_placeholder(live.data):
+                scale = live.data
+            else:
+                return None
+        return packed, scale
+
+    def to_dense_weight(
+        self,
+        layer: torch.nn.Module,
+        device: torch.device | str | None = None,
+    ) -> torch.Tensor:
+        packed = self._packed_int8_and_scale(layer)
+        if packed is not None:
+            qdata, scale = packed
+        else:
+            weight = layer.weight.data
+            if is_offload_placeholder(weight):
+                raise RuntimeError(
+                    "kitchen_int8 LoRA merge saw a layerwise placeholder with "
+                    "no CPU snapshot; convert_to_lora_layers must bind "
+                    "_packed_weight_cpu first."
+                )
+            qdata = weight
+            scale = layer.weight_scale.data
+        if qdata.dtype != torch.int8:
+            return qdata.detach().to(device) if device is not None else qdata.detach()
+        return self.dequantize_packed(qdata, scale, self._dense_dtype(layer), device)
+
+    def dequantize_packed(
+        self,
+        qdata: torch.Tensor,
+        scale: torch.Tensor,
+        orig_dtype: torch.dtype,
+        device: torch.device | str | None = None,
+    ) -> torch.Tensor:
+        from comfy_kitchen.tensor.int8 import TensorWiseINT8Layout
+
+        compute = torch.device("cuda")
+        qdata = qdata.detach().to(compute).contiguous()
+        scale = scale.detach().to(compute).contiguous()
+        params = TensorWiseINT8Layout.Params(
+            scale=scale,
+            orig_dtype=orig_dtype,
+            orig_shape=tuple(qdata.shape),
+            is_weight=True,
+            convrot=True,
+            convrot_groupsize=self.group_size,
         )
-        self.quant_config.note_quantized(weight.numel() * weight.element_size())
-        del qdata, params
-        torch.cuda.empty_cache()
+        dense = TensorWiseINT8Layout.dequantize(qdata, params)
+        if device is not None:
+            dense = dense.to(device)
+        return dense
+
+    def from_dense_weight(self, layer: torch.nn.Module, weight: torch.Tensor) -> None:
+        dense = weight.detach().to(dtype=self._dense_dtype(layer))
+        layer._kitchen_dense_dtype = dense.dtype
+        qdata, scale = self._quantize_dense(dense, torch.device("cuda"))
+        self._install_packed(layer, qdata, scale)
+
+    def snapshot_for_lora(
+        self, layer: torch.nn.Module, clone: bool = True
+    ) -> dict[str, torch.Tensor]:
+        def _maybe_clone(tensor: torch.Tensor) -> torch.Tensor:
+            data = tensor.detach().to("cpu")
+            return data.clone() if clone else data
+
+        packed = self._packed_int8_and_scale(layer)
+        if packed is not None:
+            qdata, scale = packed
+            return {
+                "weight": _maybe_clone(qdata),
+                "weight_scale": _maybe_clone(scale),
+            }
+        snapshot = {"weight": _maybe_clone(layer.weight.data)}
+        scale = getattr(layer, "weight_scale", None)
+        if scale is not None and not is_offload_placeholder(scale.data):
+            snapshot["weight_scale"] = _maybe_clone(scale.data)
+        return snapshot
+
+    def restore_for_lora(
+        self, layer: torch.nn.Module, snapshot: dict[str, torch.Tensor]
+    ) -> None:
+        self._install_packed(layer, snapshot["weight"], snapshot.get("weight_scale"))
 
     def apply(
         self,
