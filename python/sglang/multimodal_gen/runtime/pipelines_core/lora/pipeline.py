@@ -458,6 +458,10 @@ class LoRAPipeline(ComposedPipelineBase):
         base._offload_root = module
         base._offload_param_prefix = name
         base._packed_weight_cpu = data
+        scale = materialized.get(f"{name}.weight_scale")
+        if scale is not None:
+            base._packed_scale_cpu = scale.detach()
+        lora_layer.bind_quant_base_snapshot(clone=snapshot_base)
 
     def _reject_lora_on_packed_weights(self) -> None:
         """Fail before any layer is replaced if a target has no plain weight.
@@ -1251,7 +1255,18 @@ class LoRAPipeline(ComposedPipelineBase):
         merged bytes, the cache holds them file-backed, and the layer adopts
         the mapping. If the cache cannot serve or take the bytes, fall back
         to the in-place merge — correctness first, memory second.
+
+        Kitchen INT8 stores ConvRot packed weights; the cache is a dense
+        mapping keyed by the live dtype/shape, so that path cannot hold the
+        dequant/requant roundtrip. Merge in place instead.
         """
+        if getattr(
+            getattr(layer.base_layer, "quant_method", None),
+            "lora_merge_in_original_space",
+            False,
+        ):
+            layer.merge_lora_weights()
+            return
         base_view = layer.weight.data
         mapped = merge_cache.get(name, base_view.shape, base_view.dtype)
         if mapped is None:
