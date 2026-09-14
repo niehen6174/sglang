@@ -370,9 +370,9 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def _accepts_mxfp8_input(linear: nn.Module) -> bool:
-    return linear.quant_method is not None and linear.quant_method.accepts_mxfp8_input(
-        linear
-    )
+    inner = getattr(linear, "base_layer", linear)
+    method = getattr(inner, "quant_method", None)
+    return method is not None and method.accepts_mxfp8_input(inner)
 
 
 def _modulate_scale_shift(
