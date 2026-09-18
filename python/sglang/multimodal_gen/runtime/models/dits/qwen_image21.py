@@ -28,6 +28,7 @@ from sglang.multimodal_gen.runtime.distributed.communication_op import (
 from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_sp_parallel_rank,
 )
+from sglang.multimodal_gen.runtime.distributed.sp_shard_utils import gather_seq
 from sglang.multimodal_gen.runtime.layers.attention import LocalAttention, USPAttention
 from sglang.multimodal_gen.runtime.layers.linear import (
     ColumnParallelLinear,
@@ -97,6 +98,76 @@ def build_layout(image_slots, image_shapes, axes_dims, device):
         target_rope=rope[prefix_len:],
         segments=tuple(segments),
     )
+
+
+def prefix_sp_plan(length, sp_size=None, sp_rank=None):
+    """Return (start, end, local_cap) for this rank's prefix shard.
+
+    Tokens are split into even ``ceil(length / sp)`` chunks; the last rank
+    may hold a short tail or nothing. ``local_cap`` is the padded width used
+    to all-gather K/V into a replicated prefix cache for later steps.
+    """
+    if sp_size is None:
+        sp_size = get_sp_world_size()
+    if sp_rank is None:
+        sp_rank = get_sp_parallel_rank() if sp_size > 1 else 0
+    if sp_size <= 1:
+        return 0, length, length
+    local_cap = (length + sp_size - 1) // sp_size
+    start = sp_rank * local_cap
+    return start, min(start + local_cap, length), local_cap
+
+
+def pad_prefix_kv(tensor, local_cap):
+    seq = tensor.shape[1]
+    if seq == local_cap:
+        return tensor.contiguous()
+    if seq > local_cap:
+        raise ValueError(f"prefix shard {seq} exceeds local cap {local_cap}")
+    pad = tensor.new_zeros(tensor.shape[0], local_cap - seq, *tensor.shape[2:])
+    return torch.cat([tensor, pad], dim=1)
+
+
+def gather_prefix_kv(local_k, local_v, prefix_len, local_cap):
+    if get_sp_world_size() <= 1:
+        return local_k, local_v
+    return (
+        gather_seq(pad_prefix_kv(local_k, local_cap), prefix_len),
+        gather_seq(pad_prefix_kv(local_v, local_cap), prefix_len),
+    )
+
+
+def attend_prefix_segments(attn, q, k, v, segments, query_start):
+    """Attend local prefix queries to the gathered prefix K/V.
+
+    Text runs stay causal with global positions; image blocks see the entire
+    preceding sequence and themselves. SP=1 with ``query_start=0`` matches the
+    original full-prefix loop.
+    """
+    query_end = query_start + q.shape[1]
+    outputs = []
+    for start, end, is_image in segments:
+        q0 = max(start, query_start)
+        q1 = min(end, query_end)
+        if q0 >= q1:
+            continue
+        mask = None
+        if not is_image:
+            mask = (
+                torch.arange(end, device=q.device)[None, :]
+                <= torch.arange(q0, q1, device=q.device)[:, None]
+            )[None, None]
+        outputs.append(
+            attn(
+                q[:, q0 - query_start : q1 - query_start],
+                k[:, :end],
+                v[:, :end],
+                attn_mask=mask,
+            )
+        )
+    if not outputs:
+        return q.new_zeros(q.shape[0], 0, *q.shape[2:])
+    return torch.cat(outputs, dim=1)
 
 
 def apply_rope(x, rope):
@@ -277,28 +348,31 @@ class QwenImage21Attention(nn.Module):
             v,
         )
 
-    def forward(self, x, rope, prefix, prefix_rope, segments, cache):
+    def forward(
+        self,
+        x,
+        rope,
+        prefix,
+        prefix_rope,
+        segments,
+        cache,
+        query_start=0,
+        prefix_len=0,
+        local_cap=0,
+    ):
         if cache:
             kp, vp = cache["key"], cache["value"]
             prefix_output = None
         else:
             qp, kp, vp = self.qkv(prefix, prefix_rope)
-            outputs = []
-            # text runs are causal; image blocks see the entire preceding sequence and themselves
-            for start, end, is_image in segments:
-                mask = None
-                if not is_image:
-                    mask = (
-                        torch.arange(end, device=x.device)[None, :]
-                        <= torch.arange(start, end, device=x.device)[:, None]
-                    )
-                    mask = mask[None, None]
-                outputs.append(
-                    self.local_attn(
-                        qp[:, start:end], kp[:, :end], vp[:, :end], attn_mask=mask
-                    )
-                )
-            prefix_output = self.to_out[0](torch.cat(outputs, dim=1).flatten(2))[0]
+            kp, vp = gather_prefix_kv(
+                kp, vp, prefix_len or kp.shape[1], local_cap or kp.shape[1]
+            )
+            prefix_output = self.to_out[0](
+                attend_prefix_segments(
+                    self.local_attn, qp, kp, vp, segments, query_start
+                ).flatten(2)
+            )[0]
             if cache is not None:
                 cache.update(key=kp, value=vp)
         q, k, v = self.qkv(x, rope)
@@ -331,6 +405,10 @@ class QwenImage21TransformerBlock(nn.Module):
         cache,
     ):
         prefix = prefix_state.get("hidden_states")
+        query_start = prefix_state.get("start", 0)
+        prefix_rope = layout["prefix_rope"]
+        if prefix is not None:
+            prefix_rope = prefix_rope[query_start : query_start + prefix.shape[1]]
         scale1, gate1, scale2, gate2 = modulation[:, None].chunk(4, dim=-1)
         p = None
         if not cache:
@@ -340,9 +418,12 @@ class QwenImage21TransformerBlock(nn.Module):
             apply_modulation(hidden_states, self.img_norm1, scale1),
             rope,
             p,
-            layout["prefix_rope"],
+            prefix_rope,
             layout["segments"],
             cache,
+            query_start=query_start,
+            prefix_len=prefix_state.get("length", 0),
+            local_cap=prefix_state.get("local_cap", 0),
         )
         hidden_states = residual_gate_add(hidden_states, attention, gate1.tanh())
         hidden_states = residual_gate_add(
@@ -452,6 +533,7 @@ class QwenImage21Transformer2DModel(CachableDiT, LayerwiseOffloadableModuleMixin
                 else [None] * len(self.transformer_blocks)
             )
             prefix = None
+            prefix_start = prefix_len = local_cap = 0
             if not caches[0]:
                 prefix = self.txt_in(
                     encoder_hidden_states[sample : sample + 1]
@@ -460,7 +542,15 @@ class QwenImage21Transformer2DModel(CachableDiT, LayerwiseOffloadableModuleMixin
                     prefix[:, layout["image_indices"]] = self.img_in(
                         condition_latents[sample : sample + 1]
                     )
-            prefix_state = {"hidden_states": prefix}
+                prefix_len = prefix.shape[1]
+                prefix_start, prefix_end, local_cap = prefix_sp_plan(prefix_len)
+                prefix = prefix[:, prefix_start:prefix_end]
+            prefix_state = {
+                "hidden_states": prefix,
+                "start": prefix_start,
+                "length": prefix_len,
+                "local_cap": local_cap,
+            }
             x = images[sample : sample + 1]
             for i, block in enumerate(self.transformer_blocks):
                 x = block(

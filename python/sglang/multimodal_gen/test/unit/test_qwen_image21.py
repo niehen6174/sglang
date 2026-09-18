@@ -27,7 +27,12 @@ from sglang.multimodal_gen.runtime.managers.memory_managers.component_manager im
 from sglang.multimodal_gen.runtime.managers.memory_managers.component_residency_strategies import (
     ComponentOffloadStrategy,
 )
-from sglang.multimodal_gen.runtime.models.dits.qwen_image21 import build_layout
+from sglang.multimodal_gen.runtime.models.dits.qwen_image21 import (
+    attend_prefix_segments,
+    build_layout,
+    pad_prefix_kv,
+    prefix_sp_plan,
+)
 from sglang.multimodal_gen.runtime.models.vaes.autoencoder_kl_qwenimage21 import (
     AutoencoderKLQwenImage21,
     QwenImage21RMS_norm,
@@ -140,6 +145,62 @@ def test_condition_slots_expand_to_actual_latent_grid():
     assert len(layout["prefix_rope"]) == 38
     assert layout["segments"] == ((0, 2, False), (2, 34, True), (34, 38, False))
     torch.testing.assert_close(collapsed[slots][0], hidden[2])
+
+
+@pytest.mark.parametrize(
+    ("length", "sp_size", "expected"),
+    [
+        (0, 1, [(0, 0, 0)]),
+        (5, 1, [(0, 5, 5)]),
+        (5, 2, [(0, 3, 3), (3, 5, 3)]),
+        (1, 2, [(0, 1, 1), (1, 1, 1)]),
+        (4, 3, [(0, 2, 2), (2, 4, 2), (4, 4, 2)]),
+    ],
+)
+def test_prefix_sp_plan_covers_tokens_without_overlap(length, sp_size, expected):
+    plans = [
+        prefix_sp_plan(length, sp_size=sp_size, sp_rank=rank) for rank in range(sp_size)
+    ]
+    assert plans == expected
+    covered = []
+    for start, end, cap in plans:
+        assert 0 <= start <= end <= length
+        assert end - start <= cap
+        covered.extend(range(start, end))
+    assert covered == list(range(length))
+
+
+def test_prefix_sp_attention_matches_replicated_prefill():
+    torch.manual_seed(0)
+    length = 7
+    segments = ((0, 2, False), (2, 6, True), (6, 7, False))
+    q = torch.randn(2, length, 2, 4)
+    k = torch.randn(2, length, 2, 4)
+    v = torch.randn(2, length, 2, 4)
+
+    def attn(query, key, value, attn_mask=None):
+        scores = torch.einsum("bqhd,bkhd->bhqk", query, key)
+        if attn_mask is not None:
+            scores = scores.masked_fill(~attn_mask, torch.finfo(scores.dtype).min)
+        weights = torch.softmax(scores, dim=-1)
+        return torch.einsum("bhqk,bkhd->bqhd", weights, value)
+
+    expected = attend_prefix_segments(attn, q, k, v, segments, 0)
+    shards, keys, values = [], [], []
+    for rank in range(2):
+        start, end, cap = prefix_sp_plan(length, sp_size=2, sp_rank=rank)
+        keys.append(pad_prefix_kv(k[:, start:end], cap))
+        values.append(pad_prefix_kv(v[:, start:end], cap))
+        shards.append(
+            attend_prefix_segments(attn, q[:, start:end], k, v, segments, start)
+        )
+    torch.testing.assert_close(torch.cat(keys, dim=1)[:, :length], k, atol=0, rtol=0)
+    torch.testing.assert_close(torch.cat(values, dim=1)[:, :length], v, atol=0, rtol=0)
+    torch.testing.assert_close(torch.cat(shards, dim=1), expected, atol=0, rtol=0)
+    empty = attend_prefix_segments(attn, q[:, :0], k, v, segments, length)
+    assert empty.shape == (2, 0, 2, 4)
+    with pytest.raises(ValueError, match="local cap"):
+        pad_prefix_kv(k, 1)
 
 
 def test_adjacent_image_slots_stay_distinct():

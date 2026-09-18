@@ -27,7 +27,10 @@ from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_c
 from sglang.multimodal_gen.runtime.models.dits import qwen_image21 as model_module
 from sglang.multimodal_gen.runtime.models.dits.qwen_image21 import (
     QwenImage21Transformer2DModel,
+    attend_prefix_segments,
     build_layout,
+    pad_prefix_kv,
+    prefix_sp_plan,
 )
 from sglang.multimodal_gen.runtime.pipelines.qwen_image21 import QwenImage21Pipeline
 from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
@@ -157,6 +160,111 @@ def test_diffusers_lora_matches_weight_delta_and_restores_base(
         torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
         pipeline.unmerge_lora_weights("transformer")
         torch.testing.assert_close(actual_model(**kwargs), baseline, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("edit", [False, True])
+@pytest.mark.parametrize("sp_size", [2, 3, 4])
+@torch.no_grad()
+def test_prefix_sp_prefill_matches_replicated(model, edit, sp_size):
+    kwargs = inputs(5, edit)
+    layout = kwargs["layouts"][0]
+    prefix_len = layout["prefix_rope"].shape[0]
+    prefix = torch.randn(1, prefix_len, model.hidden_size, device="cuda")
+    rope = layout["prefix_rope"]
+    segments = layout["segments"]
+    attn = model.transformer_blocks[0].attn
+    with set_forward_context(None, None):
+        query, key, value = attn.qkv(prefix, rope)
+        expected = attend_prefix_segments(
+            attn.local_attn, query, key, value, segments, 0
+        )
+        shards, keys, values = [], [], []
+        for rank in range(sp_size):
+            start, end, cap = prefix_sp_plan(prefix_len, sp_size=sp_size, sp_rank=rank)
+            if end > start:
+                local_q, local_k, local_v = attn.qkv(
+                    prefix[:, start:end], rope[start:end]
+                )
+            else:
+                local_q, local_k, local_v = (
+                    query[:, :0],
+                    key[:, :0],
+                    value[:, :0],
+                )
+            keys.append(pad_prefix_kv(local_k, cap))
+            values.append(pad_prefix_kv(local_v, cap))
+            shards.append(
+                attend_prefix_segments(
+                    attn.local_attn,
+                    query[:, start:end],
+                    key,
+                    value,
+                    segments,
+                    start,
+                )
+            )
+            if end > start:
+                torch.testing.assert_close(
+                    local_q, query[:, start:end], atol=1e-6, rtol=1e-5
+                )
+    torch.testing.assert_close(
+        torch.cat(keys, dim=1)[:, :prefix_len], key, atol=1e-6, rtol=1e-5
+    )
+    torch.testing.assert_close(
+        torch.cat(values, dim=1)[:, :prefix_len], value, atol=1e-6, rtol=1e-5
+    )
+    torch.testing.assert_close(torch.cat(shards, dim=1), expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("edit", [False, True])
+@torch.no_grad()
+def test_attention_forward_shards_prefix_and_keeps_full_cache(
+    model, edit, monkeypatch
+):
+    kwargs = inputs(5, edit)
+    layout = kwargs["layouts"][0]
+    prefix_len = layout["prefix_rope"].shape[0]
+    prefix = torch.randn(1, prefix_len, model.hidden_size, device="cuda")
+    target = torch.randn(1, 8, model.hidden_size, device="cuda")
+    attn = model.transformer_blocks[0].attn
+    cache = {}
+    with set_forward_context(None, None):
+        target_out, prefix_out = attn(
+            target,
+            layout["target_rope"][:8],
+            prefix,
+            layout["prefix_rope"],
+            layout["segments"],
+            cache,
+        )
+        monkeypatch.setattr(
+            model_module,
+            "gather_prefix_kv",
+            lambda local_k, local_v, length, cap: (cache["key"], cache["value"]),
+        )
+        shards = []
+        for rank in range(2):
+            start, end, cap = prefix_sp_plan(prefix_len, sp_size=2, sp_rank=rank)
+            local_cache = {}
+            local_target, local_prefix = attn(
+                target,
+                layout["target_rope"][:8],
+                prefix[:, start:end],
+                layout["prefix_rope"][start:end],
+                layout["segments"],
+                local_cache,
+                query_start=start,
+                prefix_len=prefix_len,
+                local_cap=cap,
+            )
+            shards.append(local_prefix)
+            torch.testing.assert_close(local_target, target_out, atol=0, rtol=0)
+            torch.testing.assert_close(local_cache["key"], cache["key"], atol=0, rtol=0)
+            torch.testing.assert_close(
+                local_cache["value"], cache["value"], atol=0, rtol=0
+            )
+    torch.testing.assert_close(torch.cat(shards, dim=1), prefix_out, atol=1e-6, rtol=1e-5)
+    assert cache["key"].shape[1] == prefix_len
 
 
 @pytest.mark.parametrize("edit", [False, True])

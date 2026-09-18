@@ -50,7 +50,7 @@ class QwenImage21PipelineConfig(ImagePipelineConfig):
         )
 
     def shard_latents_for_sp(self, batch, latents):
-        # the DiT shards only the target stream; its condition prefix stays replicated
+        # packing stays unsharded; the DiT shards target tokens and prefix prefill
         return latents, False
 
     def gather_latents_for_sp(self, latents, batch=None):
