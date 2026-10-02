@@ -213,6 +213,11 @@ class LinearBase(torch.nn.Module):
         self.params_dtype = params_dtype
         self.quant_config = quant_config
         self.prefix = prefix
+        # (rank, world) when a model narrowed this layer's output rows a second
+        # time, inside its TP partition, to one Ulysses rank's attention heads.
+        # LoRA reads it to slice adapter B rows the same way; None means the
+        # rows are exactly the TP partition.
+        self.ulysses_head_shard: tuple[int, int] | None = None
         if quant_config is None:
             self.quant_method: QuantizeMethodBase | None = UnquantizedLinearMethod()
         else:

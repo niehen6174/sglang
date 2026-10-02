@@ -172,6 +172,26 @@ class BaseLayerWithLoRA(nn.Module):
     def slice_lora_b_weights(self, B: torch.Tensor) -> torch.Tensor:
         return B
 
+    def _head_shard_window(self, part_size: int) -> tuple[int, int]:
+        """Rows of one TP partition that an Ulysses head shard kept.
+
+        Ulysses head-sharding narrows the base weight a second time, inside
+        the TP partition, after post_load_weights. Adapters still arrive at the
+        checkpoint's full width, so a B slice is the TP offset plus this one.
+        Returns the whole partition when the base layer was not head-sharded.
+        """
+        shard = self.base_layer.ulysses_head_shard
+        if shard is None:
+            return 0, part_size
+        ulysses_rank, ulysses_world = shard
+        if part_size % ulysses_world:
+            raise ValueError(
+                "Ulysses head-sharded LoRA needs the TP partition to divide by "
+                f"the Ulysses degree: {part_size} % {ulysses_world} != 0"
+            )
+        local = part_size // ulysses_world
+        return ulysses_rank * local, local
+
     def _scaled_lora_output_offset(
         self,
         offset: torch.Tensor | None,
@@ -762,10 +782,9 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
     def slice_lora_b_weights(self, B: torch.Tensor) -> torch.Tensor:
         tp_rank = get_tp_rank()
         shard_size = self.base_layer.output_partition_sizes[0]
-        start_idx = tp_rank * shard_size
-        end_idx = (tp_rank + 1) * shard_size
-        B = B[start_idx:end_idx, :]
-        return B
+        offset, size = self._head_shard_window(shard_size)
+        start_idx = tp_rank * shard_size + offset
+        return B[start_idx : start_idx + size, :]
 
 
 class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
@@ -786,9 +805,9 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         if B.dim() == 3:
             # Stacked Q/K/V (or gate/up) LoRA weights from diffusers-style adapters.
             shard_size = self.base_layer.output_partition_sizes[0]
-            start_idx = tp_rank * shard_size
-            end_idx = (tp_rank + 1) * shard_size
-            return B[:, start_idx:end_idx, :]
+            offset, size = self._head_shard_window(shard_size)
+            start_idx = tp_rank * shard_size + offset
+            return B[:, start_idx : start_idx + size, :]
 
         # Native fused checkpoints (MiniMax H3, etc.) store one concatenated 2D
         # lora_B matrix per logical layer; shard each section independently.
@@ -798,9 +817,11 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             self.base_layer.output_sizes,
             self.base_layer.output_partition_sizes,
         ):
-            local_start = tp_rank * part_size
-            local_end = (tp_rank + 1) * part_size
-            shards.append(B[row_offset + local_start : row_offset + local_end, :])
+            offset, size = self._head_shard_window(part_size)
+            local_start = tp_rank * part_size + offset
+            shards.append(
+                B[row_offset + local_start : row_offset + local_start + size, :]
+            )
             row_offset += full_size
         return torch.cat(shards, dim=0)
 

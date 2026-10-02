@@ -69,6 +69,7 @@ from sglang.multimodal_gen.runtime.layers.linear import (
     LinearBase,
     MergedColumnParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config import (
     QuantizationConfig,
@@ -499,6 +500,122 @@ def _apply_qk_norm(
     return q_norm(q), k_norm(k)
 
 
+def _norm_rope_qk(
+    attention: MiniMaxH3Attention,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    rope_cache: tuple[torch.Tensor, torch.Tensor] | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-head Q/K RMSNorm, then RoPE when a cache is supplied."""
+    if rope_cache is None:
+        return _apply_qk_norm(
+            q, k, attention.q_norm, attention.k_norm, attention.head_dim
+        )
+    cos_sin_cache, positions = rope_cache
+    if attention._use_fused_qknorm_rope and not torch.compiler.is_compiling():
+        fused_inplace_qknorm_rope(
+            q,
+            k,
+            attention.q_norm.weight,
+            attention.k_norm.weight,
+            cos_sin_cache,
+            positions,
+            is_neox=True,
+            eps=attention.q_norm.eps,
+            head_dim=attention.head_dim,
+            rope_dim=cos_sin_cache.shape[-1],
+            round_norm_before_rope=True,
+        )
+        return q, k
+    q, k = _apply_qk_norm(q, k, attention.q_norm, attention.k_norm, attention.head_dim)
+    return _apply_rope_qk(q, k, cos_sin_cache, positions)
+
+
+_HEAD_SHARD_ROPE_SRC: torch.Tensor | None = None
+_HEAD_SHARD_ROPE_FULL: torch.Tensor | None = None
+_HEAD_SHARD_POSITIONS: torch.Tensor | None = None
+
+
+def _head_shard_gathered_rope(
+    rope_cache: tuple[torch.Tensor, torch.Tensor] | None,
+) -> torch.Tensor | None:
+    """Gather a request-static RoPE cache once, then reuse it for every layer."""
+    global _HEAD_SHARD_ROPE_SRC, _HEAD_SHARD_ROPE_FULL
+    if rope_cache is None:
+        return None
+    src = rope_cache[0]
+    if _HEAD_SHARD_ROPE_SRC is src and _HEAD_SHARD_ROPE_FULL is not None:
+        return _HEAD_SHARD_ROPE_FULL
+    from sglang.multimodal_gen.runtime.layers.usp import ulysses_all_gather_rows
+
+    gathered = ulysses_all_gather_rows(src, role="ulysses_rope_gather")
+    _HEAD_SHARD_ROPE_SRC = src
+    _HEAD_SHARD_ROPE_FULL = gathered
+    return gathered
+
+
+def _head_shard_full_positions(rows: int, device: torch.device) -> torch.Tensor:
+    global _HEAD_SHARD_POSITIONS
+    pos = _HEAD_SHARD_POSITIONS
+    if pos is None or pos.shape[0] != rows or pos.device != device:
+        pos = torch.arange(rows, device=device, dtype=torch.long)
+        _HEAD_SHARD_POSITIONS = pos
+    return pos
+
+
+def slice_merged_qkv_heads(
+    weight: torch.Tensor,
+    num_heads: int,
+    head_dim: int,
+    rank: int,
+    world: int,
+) -> torch.Tensor:
+    """Keep one Ulysses rank's heads from ``[q_all | k_all | v_all]``."""
+    if world <= 1:
+        return weight
+    head_width = num_heads * head_dim
+    local_width = head_width // world
+    parts = [
+        weight.narrow(0, section * head_width + rank * local_width, local_width)
+        for section in range(3)
+    ]
+    return torch.cat(parts, dim=0).contiguous()
+
+
+# Narrowing output rows only stays correct while the scales are per tensor or
+# absent. torch.float8_e4m3fn.is_floating_point is True, so an allowlist rather
+# than is_floating_point is what keeps a quantized qkv off this path: block-FP8
+# holds one weight_scale_inv row per weight_block_size[0] weight rows, and
+# slicing weight without slicing that scale mis-scales the result silently.
+_HEAD_SHARDABLE_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
+
+
+def _plain_head_shardable(linear: LinearBase, weight: torch.Tensor, rows: int) -> bool:
+    if not isinstance(linear.quant_method, UnquantizedLinearMethod):
+        return False
+    return (
+        torch.is_tensor(weight)
+        and not isinstance(weight, DTensor)
+        and weight.dtype in _HEAD_SHARDABLE_DTYPES
+        and weight.ndim == 2
+        and weight.shape[0] == rows
+    )
+
+
+def slice_head_rows(
+    weight: torch.Tensor,
+    num_heads: int,
+    head_dim: int,
+    rank: int,
+    world: int,
+) -> torch.Tensor:
+    """Keep one Ulysses rank's rows of a head-major projection."""
+    if world <= 1:
+        return weight
+    local_width = num_heads * head_dim // world
+    return weight.narrow(0, rank * local_width, local_width).contiguous()
+
+
 class MiniMaxH3Rope(nn.Module):
     """3D rope over (t, h, w); rotates 96 of 128 head dims (rotary_percent 0.75).
 
@@ -662,15 +779,20 @@ def _minimax_h3_attention_core_impl(
     subblock_sparse_query_block_mask: torch.Tensor | None = None,
     ring_active: bool = False,
     gate_compress: torch.Tensor | None = None,
+    skip_ulysses_input_exchange: bool = False,
 ) -> torch.Tensor:
     """Dynamic varlen attention and Ulysses/Ring collectives.
 
     This is the narrow BCG break point: projections, normalization, RoPE,
     residuals, and MLPs remain captured while the dynamic packed attention
     kernel and sequence-parallel collectives execute eagerly.
+
+    ``skip_ulysses_input_exchange`` is the head-sharded Ulysses path: Q/K/V
+    and the compression gate already cover the full Ulysses sequence for this
+    rank's heads, so only the output all-to-all still runs.
     """
 
-    if ulysses_active:
+    if ulysses_active and not skip_ulysses_input_exchange:
         from sglang.multimodal_gen.runtime.layers.usp import (
             _usp_input_all_to_all,
             _usp_input_all_to_all_packed_qkv,
@@ -680,6 +802,8 @@ def _minimax_h3_attention_core_impl(
         q, k, v = _usp_input_all_to_all_packed_qkv(q, k, v)
         if gate_compress is not None:
             gate_compress = _usp_input_all_to_all(gate_compress[None], head_dim=2)[0]
+    elif ulysses_active:
+        from sglang.multimodal_gen.runtime.layers.usp import _usp_output_all_to_all
 
     if attention._attention_impl is None:
         attention._set_attention_backend(
@@ -778,6 +902,47 @@ def _minimax_h3_attention_core_impl(
 _minimax_h3_attention_core_bcg = eager_on_graph(True)(_minimax_h3_attention_core_impl)
 
 
+def _minimax_h3_head_sharded_core_impl(
+    attention: MiniMaxH3Attention,
+    x: torch.Tensor,
+    *,
+    rope_cache: tuple[torch.Tensor, torch.Tensor] | None,
+    cu_seqlens: torch.Tensor,
+    cu_seqlens_host: tuple[int, ...] | None,
+    max_seqlen: int,
+    subblock_sparse_query_block_mask: torch.Tensor | None,
+    ring_active: bool,
+) -> torch.Tensor:
+    """Project head-sharded Q/K/V/gate over the gathered Ulysses sequence.
+
+    Each rank stores 1/world of the Q, K, V and compression-gate rows. Hidden
+    states move around a ring, narrower than the packed QKV tensor they
+    replace, and each shard is projected while the next hop is in flight.
+    Q/K/V/gate for this layer occupy one workspace shared with the other
+    blocks. The output all-to-all is unchanged.
+    """
+    q_buf, k_buf, v_buf, gate_buf = attention.project_head_sharded(x, rope_cache)
+    return _minimax_h3_attention_core_impl(
+        attention,
+        q_buf,
+        k_buf,
+        v_buf,
+        cu_seqlens=cu_seqlens,
+        cu_seqlens_host=cu_seqlens_host,
+        max_seqlen=max_seqlen,
+        ulysses_active=True,
+        subblock_sparse_query_block_mask=subblock_sparse_query_block_mask,
+        ring_active=ring_active,
+        gate_compress=gate_buf,
+        skip_ulysses_input_exchange=True,
+    )
+
+
+_minimax_h3_head_sharded_core_bcg = eager_on_graph(True)(
+    _minimax_h3_head_sharded_core_impl
+)
+
+
 class MiniMaxH3Attention(nn.Module):
     def __init__(
         self,
@@ -790,6 +955,9 @@ class MiniMaxH3Attention(nn.Module):
     ) -> None:
         super().__init__()
         self.bcg_breakpoint = bcg_breakpoint
+        self._ulysses_head_sharded = False
+        self._ulysses_local_heads = 0
+        self._ulysses_world = 1
         self.tp_size = get_tp_world_size()
         if arch.num_attention_heads % self.tp_size:
             raise ValueError(
@@ -902,6 +1070,123 @@ class MiniMaxH3Attention(nn.Module):
         # the resolved enum alongside the impl instance instead of a second
         # get_attn_backend() call at the ring gate.
         self._attention_backend_enum = backend.get_enum()
+
+    def shard_ulysses_head_projections(self) -> int:
+        """Shard Q/K/V/gate weights by Ulysses rank. Returns bytes released.
+
+        No-op unless Ulysses is active, this is a DiT block (not the text
+        refiner), and the projections are plain unquantized BF16/FP16/FP32
+        weights. Set ``SGLANG_DIFFUSION_H3_HEAD_SHARDED_ULYSSES=0`` to keep
+        the replicated-weight all-to-all path.
+        """
+        if self._ulysses_head_sharded:
+            return 0
+        if envs.SGLANG_DIFFUSION_MINIMAX_H3_HEAD_SHARD is False:
+            return 0
+        if not self.prefix.startswith("blocks."):
+            return 0
+        if self.hybrid is not None:
+            return 0
+        world, rank = get_ulysses_ctx()
+        if world <= 1 or self.num_heads % world:
+            return 0
+        qkv_rows = 3 * self.num_heads * self.head_dim
+        if not _plain_head_shardable(self.qkv_proj, self.qkv_proj.weight, qkv_rows):
+            return 0
+        if self.to_gate_compress is not None and not _plain_head_shardable(
+            self.to_gate_compress,
+            self.to_gate_compress.weight,
+            self.num_heads * self.head_dim,
+        ):
+            return 0
+
+        def install(module: nn.Module, sharded: torch.Tensor) -> int:
+            freed = (
+                module.weight.numel() - sharded.numel()
+            ) * module.weight.element_size()
+            module.weight = nn.Parameter(sharded, requires_grad=False)
+            # LoRA wraps these layers after post_load_weights and its B matrices
+            # arrive at the checkpoint's full head width; this is how
+            # slice_lora_b_weights learns which rows the base weight kept.
+            # output_partition_sizes stays at its TP value on purpose: it is
+            # what the TP offset is still computed from.
+            module.ulysses_head_shard = (rank, world)
+            return freed
+
+        freed = install(
+            self.qkv_proj,
+            slice_merged_qkv_heads(
+                self.qkv_proj.weight.data,
+                self.num_heads,
+                self.head_dim,
+                rank,
+                world,
+            ),
+        )
+        if self.to_gate_compress is not None:
+            freed += install(
+                self.to_gate_compress,
+                slice_head_rows(
+                    self.to_gate_compress.weight.data,
+                    self.num_heads,
+                    self.head_dim,
+                    rank,
+                    world,
+                ),
+            )
+        self._ulysses_head_sharded = True
+        self._ulysses_local_heads = self.num_heads // world
+        self._ulysses_world = world
+        return freed
+
+    def project_head_sharded(
+        self,
+        x: torch.Tensor,
+        rope_cache: tuple[torch.Tensor, torch.Tensor] | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Q/K/V/gate for this rank's heads over the full Ulysses sequence.
+
+        The rows are gathered once and projected in one GEMM, so the output is
+        already attention's layout. Splitting the projection to overlap the
+        gather with this rank's own rows was measured slower on both FastH3
+        VSA and dense FA: the join and the narrower GEMMs cost more than the
+        gather they hide. Returned Q/K/V match the replicated path after its
+        input all-to-all.
+        """
+        from sglang.multimodal_gen.runtime.layers.usp import (
+            ulysses_all_gather_rows,
+        )
+
+        if not self._ulysses_head_sharded:
+            raise RuntimeError("Ulysses head shards are not installed")
+        local_heads = self._ulysses_local_heads
+        head_dim = self.head_dim
+        rows = x.shape[0] * self._ulysses_world
+
+        x_full = ulysses_all_gather_rows(x, role="ulysses_hidden_gather")
+        qkv, _ = self.qkv_proj(x_full)
+        q, k, v = qkv.split(local_heads * head_dim, dim=-1)
+        q = q.view(rows, local_heads, head_dim)
+        k = k.view(rows, local_heads, head_dim)
+        v = v.view(rows, local_heads, head_dim)
+
+        rope_full = _head_shard_gathered_rope(rope_cache)
+        if rope_full is not None:
+            q, k = _norm_rope_qk(
+                self, q, k, (rope_full, _head_shard_full_positions(rows, x.device))
+            )
+        else:
+            q, k = _norm_rope_qk(self, q, k, None)
+
+        gate = None
+        if (
+            self.to_gate_compress is not None
+            and self._attention_backend_enum
+            is AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3
+        ):
+            gate_out, _ = self.to_gate_compress(x_full)
+            gate = gate_out.view(rows, local_heads, head_dim)
+        return q, k, v, gate
 
     def _install_qkv_weight_loader(self, arch: MiniMaxH3DiTArchConfig) -> None:
         weight = self.qkv_proj.weight
@@ -1091,11 +1376,14 @@ class MiniMaxH3Attention(nn.Module):
         Operation order: fused qkv projection -> per-head q/k RMSNorm -> RoPE
         on q/k -> variable-length non-causal flash attention -> output projection.
 
-        With Ulysses sequence parallelism, x holds this rank's row shard;
-        qkv/norm/RoPE run locally, an all-to-all trades sequence for heads.
-        Each rank attends the full sequence with heads/world_size local heads,
-        so cu_seqlens retains global packed-document semantics. The inverse
-        all-to-all restores the row shard before the output projection.
+        With Ulysses sequence parallelism, x holds this rank's row shard.
+        The replicated-weight path projects every head locally, then an
+        all-to-all trades sequence for heads. The head-sharded path stores
+        only this rank's Q/K/V/gate heads and projects each hidden shard as
+        the ring delivers it. Either way each rank attends the full sequence with heads/world_size
+        local heads, so cu_seqlens retains global packed-document semantics.
+        The output all-to-all restores the row shard before the output
+        projection.
         """
         if x.device.type == "mps" and not ulysses_active:
             return self._forward_mps_streamed_attention(
@@ -1105,6 +1393,30 @@ class MiniMaxH3Attention(nn.Module):
                 cu_seqlens_host=cu_seqlens_host,
                 max_seqlen=max_seqlen,
             )
+        if self._ulysses_head_sharded and ulysses_active:
+            if x_prequant is not None:
+                raise RuntimeError(
+                    "MiniMax H3 head-sharded Ulysses does not accept a "
+                    "prequantized QKV activation"
+                )
+            core = (
+                _minimax_h3_head_sharded_core_bcg
+                if self.bcg_breakpoint
+                else _minimax_h3_head_sharded_core_impl
+            )
+            out = core(
+                self,
+                x,
+                rope_cache=rope_cache,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_host=cu_seqlens_host,
+                max_seqlen=max_seqlen,
+                subblock_sparse_query_block_mask=subblock_sparse_query_block_mask,
+                ring_active=ring_active,
+            )
+            out = out.reshape(x.shape[0], self.num_heads * self.head_dim)
+            out, _ = self.out_proj(out)
+            return out
 
         total = x.shape[0]
         qkv, _ = self.qkv_proj(x if x_prequant is None else x_prequant)
@@ -1130,39 +1442,7 @@ class MiniMaxH3Attention(nn.Module):
                 ulysses_active=ulysses_active,
                 ring_active=ring_active,
             )
-        if rope_cache is None:
-            q, k = _apply_qk_norm(
-                q,
-                k,
-                self.q_norm,
-                self.k_norm,
-                self.head_dim,
-            )
-        else:
-            cos_sin_cache, positions = rope_cache
-            if self._use_fused_qknorm_rope and not torch.compiler.is_compiling():
-                fused_inplace_qknorm_rope(
-                    q,
-                    k,
-                    self.q_norm.weight,
-                    self.k_norm.weight,
-                    cos_sin_cache,
-                    positions,
-                    is_neox=True,
-                    eps=self.q_norm.eps,
-                    head_dim=self.head_dim,
-                    rope_dim=cos_sin_cache.shape[-1],
-                    round_norm_before_rope=True,
-                )
-            else:
-                q, k = _apply_qk_norm(
-                    q,
-                    k,
-                    self.q_norm,
-                    self.k_norm,
-                    self.head_dim,
-                )
-                q, k = _apply_rope_qk(q, k, cos_sin_cache, positions)
+        q, k = _norm_rope_qk(self, q, k, rope_cache)
 
         gate_compress = None
         if (
@@ -2274,6 +2554,24 @@ class MiniMaxH3DiTModel(SpectrumMixin, BaseDiT, LayerwiseOffloadableModuleMixin)
             )
         if self.adaln_cache is not None:
             self.adaln_cache.load(self.video_patch_proj.weight.device)
+        freed = 0
+        sharded_layers = 0
+        local_heads = 0
+        for block in self.blocks:
+            released = block.attn.shard_ulysses_head_projections()
+            if released:
+                freed += released
+                sharded_layers += 1
+                local_heads = block.attn._ulysses_local_heads
+        if sharded_layers:
+            logger.info(
+                "MiniMax-H3 Ulysses head-sharded Q/K/V/gate projections on "
+                "%d layers (%d local heads); freed %.3f GiB of replicated "
+                "projection weight on this rank",
+                sharded_layers,
+                local_heads,
+                freed / (1024**3),
+            )
 
     def _time_embedding(self, timesteps: torch.Tensor) -> torch.Tensor:
         if self.adaln_t_table is None:

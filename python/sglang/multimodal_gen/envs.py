@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     SGLANG_DIFFUSION_MINIMAX_H3_ADALN_GPU_PLANS: int = 64
     SGLANG_DIFFUSION_MINIMAX_H3_ADALN_FP32: bool = False
     SGLANG_DIFFUSION_MINIMAX_H3_PDD_HEADS: str | None = None
+    SGLANG_DIFFUSION_MINIMAX_H3_HEAD_SHARD: bool | None = None
     SGLANG_DIFFUSION_FLUX3_NATTEN_BACKEND: str | None = None
     SGLANG_DIFFUSION_CFG_GATE_STEP: float = 1.0
     # cache-dit env vars (primary transformer)
@@ -153,6 +154,14 @@ def _lazy_optional_float(key: str) -> Callable[[], float | None]:
 
 def _lazy_bool(key: str, default: str = "false") -> Callable[[], bool]:
     return lambda: get_bool_env_var(key, default)
+
+
+def _lazy_optional_bool(key: str) -> Callable[[], bool | None]:
+    def _getter():
+        val = os.getenv(key)
+        return get_bool_env_var(key) if val is not None else None
+
+    return _getter
 
 
 def _lazy_path(
@@ -334,6 +343,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # PDD-distilled checkpoint; an ordinary run leaves the projection alone.
     "SGLANG_DIFFUSION_MINIMAX_H3_PDD_HEADS": _lazy_str(
         "SGLANG_DIFFUSION_MINIMAX_H3_PDD_HEADS"
+    ),
+    # Store only this Ulysses rank's Q/K/V/gate heads instead of replicating
+    # every head and trading them in the input all-to-all. Unset lets
+    # shard_ulysses_head_projections decide from its preconditions; 1 forces
+    # it on where those decline, 0 keeps the replicated-weight path.
+    "SGLANG_DIFFUSION_MINIMAX_H3_HEAD_SHARD": _lazy_optional_bool(
+        "SGLANG_DIFFUSION_MINIMAX_H3_HEAD_SHARD"
     ),
     # NATTEN backend of the FLUX 3 video VAE (blackwell-fna, hopper-fna,
     # cutlass-fna or flex-fna); probed per GPU when unset.

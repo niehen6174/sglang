@@ -109,6 +109,30 @@ def _usp_all_to_all_single(x: torch.Tensor, role: str | None = None) -> torch.Te
     return output.reshape(x_shape)
 
 
+def ulysses_all_gather_rows(
+    x: torch.Tensor, *, role: str = "ulysses_all_gather_rows"
+) -> torch.Tensor:
+    """All-gather sequence rows on the Ulysses group, rank 0's shard first.
+
+    ``[S_local, ...]`` becomes ``[S_local * world, ...]``. Ranks must contribute
+    equal row counts, which is the same contract as the Ulysses all-to-all.
+    """
+    world = get_ulysses_parallel_world_size()
+    if world <= 1:
+        return x
+    group = get_sp_group().ulysses_group
+    assert group is not None, "Ulysses process group is not initialized."
+    x = x.contiguous()
+    out = _a2a_staging_buffer(
+        role,
+        (world * x.shape[0],) + tuple(x.shape[1:]),
+        x.dtype,
+        x.device,
+    )
+    dist.all_gather_single(out.view(world, *x.shape), x, group=group)
+    return out
+
+
 def _usp_all_to_all_single_varlen(
     x: torch.Tensor,
     output_split_sizes: list[int],

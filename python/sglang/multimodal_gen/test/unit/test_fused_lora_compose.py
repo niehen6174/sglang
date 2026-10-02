@@ -123,6 +123,7 @@ class _FakeMergedLinear(torch.nn.Module):
         self.bias = None
         self.skip_bias_add = False
         self.gather_output = False
+        self.ulysses_head_shard = None
         self.quant_method = SimpleNamespace(
             apply=lambda layer, x, bias=None: F.linear(x, layer.weight, bias)
         )
