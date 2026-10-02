@@ -238,6 +238,12 @@ def get_attn_backend(
     elif not selection_is_explicit:
         allowed_fallback_reason = "platform default fallback"
 
+    # Where that fallback applies, the layer's declared set also decides: a
+    # global backend admitted past it reaches the layer and fails at the call,
+    # not at selection (VSA-H3 only implements forward_varlen, so an auxiliary
+    # component calling forward raises mid-request).
+    global_backend_fallback = allowed_fallback_reason == "global backend fallback"
+
     constraint_backend = None
     if selected_backend is None and len(be_tuple) == 1:
         constraint_backend = be_tuple[0].name.lower()
@@ -276,7 +282,11 @@ def get_attn_backend(
                     "cross-attention"
                 )
             continue
-        explicit_candidate = selection_is_explicit and candidate_index == 0
+        explicit_candidate = (
+            selection_is_explicit
+            and candidate_index == 0
+            and not global_backend_fallback
+        )
         if (
             automatic_backends
             and not explicit_candidate
