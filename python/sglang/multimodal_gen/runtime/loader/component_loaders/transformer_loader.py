@@ -2,6 +2,7 @@ import copy
 import logging
 from collections.abc import Callable
 from contextlib import nullcontext
+from dataclasses import replace
 from typing import Any
 
 import torch
@@ -59,6 +60,26 @@ def _resolve_checkpoint_load_device(
     ):
         return torch.device("cpu")
     return runtime_device
+
+
+def _can_stage_h3_online_mxfp8(
+    *,
+    is_minimax_h3: bool,
+    component_starts_on_cpu: bool,
+    runtime_device: torch.device,
+    runtime_quant_config: object | None,
+    use_fsdp: bool,
+) -> bool:
+    """Quantize CPU-backed H3 linears without materializing the full BF16 DiT on CUDA."""
+    return bool(
+        is_minimax_h3
+        and component_starts_on_cpu
+        and runtime_device.type == "cuda"
+        and not use_fsdp
+        and runtime_quant_config is not None
+        and runtime_quant_config.get_name() == "mxfp8"
+        and not getattr(runtime_quant_config, "is_checkpoint_fp8_serialized", True)
+    )
 
 
 def _minimax_h3_adaln_cache_key_filter(name: str) -> bool:
@@ -467,6 +488,17 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
             )
 
         local_torch_device = get_local_torch_device()
+        stage_online_mxfp8 = (
+            _can_stage_h3_online_mxfp8(
+                is_minimax_h3=is_minimax_h3,
+                component_starts_on_cpu=component_starts_on_cpu,
+                runtime_device=local_torch_device,
+                runtime_quant_config=quant_spec.runtime_quant_config,
+                use_fsdp=component_server_args.use_fsdp_inference,
+            )
+            and component_server_args.minimax_h3_adaln_cache_path is None
+            and not component_server_args.minimax_h3_adaln_online
+        )
         checkpoint_load_device = (
             torch.device("cpu")
             if cpu_offload_flag
@@ -476,6 +508,7 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
                 runtime_quant_config=quant_spec.runtime_quant_config,
                 quantized_cpu_load_supported=(
                     quant_spec.gguf_file is not None
+                    or stage_online_mxfp8
                     or quant_spec.is_serialized_kitchen_int8
                     or quant_spec.is_serialized_kitchen_w4a8
                 ),
@@ -497,6 +530,14 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
                 cpu_offload_flag and current_platform.is_mps()
             ),
         )
+        if stage_online_mxfp8:
+            weight_load_plan = replace(
+                weight_load_plan,
+                weight_postprocess_device=None,
+                defer_cpu_placement=False,
+                layerwise_quant_postprocess_device=local_torch_device,
+            )
+            logger.info("Loading H3 MXFP8 on CPU with per-linear CUDA postprocessing")
         if direct_gpu_weight_loading:
             logger.warning(
                 "Direct GPU weight loading is enabled for %s; compatible checkpoint "
