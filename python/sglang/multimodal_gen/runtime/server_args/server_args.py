@@ -818,6 +818,13 @@ class ServerArgs(DisaggServerArgsMixin):
         self.enable_breakable_cuda_graph = False
 
     def _is_breakable_cuda_graph_supported_model(self) -> bool:
+        # Integrated mode identifies H3 from its single-file header, which need
+        # not have an upstream Hub ID in its arbitrary local filename.
+        if (
+            type(self.pipeline_config).__name__ == "MiniMaxH3PipelineConfig"
+            and self.comfyui_mode
+        ):
+            return True
         refs = _normalized_bcg_model_refs(self.model_id)
         refs.update(_normalized_bcg_model_refs(self.model_path))
         return bool(refs & BREAKABLE_CUDA_GRAPH_SUPPORTED_MODEL_IDS)
