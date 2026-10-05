@@ -320,6 +320,7 @@ class DiffGenerator:
         global_output_index = 0
 
         for requests in request_groups:
+            group_result_start = len(results)
             output_requests = []
             try:
                 output_requests = map_request_outputs(requests)
@@ -450,6 +451,9 @@ class DiffGenerator:
                                     output_file_path=output_file_path,
                                 )
                             )
+                # The context finalizes duration on exit, after output saving.
+                for result in results[group_result_start:]:
+                    result.generation_time = timer.duration
             except Exception as e:
                 logger.error("Generation failed: %s", e, exc_info=True)
             finally:
