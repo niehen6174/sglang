@@ -19,6 +19,9 @@ class WeightLoadPlan:
     # keep the complete mapped checkpoint state dict on the load device
     load_full_state_dict_on_device: bool = False
 
+    # CPU-backed online quantization stages each linear on the runtime device.
+    layerwise_quant_postprocess_device: torch.device | None = None
+
     @classmethod
     def for_component(
         cls,

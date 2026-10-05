@@ -351,6 +351,20 @@ def maybe_load_fsdp_model(
     )
     load_on_cpu = bool(component_starts_on_cpu and not defer_cpu_placement)
     weight_postprocess_device = weight_load_plan.weight_postprocess_device
+    layerwise_quant_postprocess_device = (
+        weight_load_plan.layerwise_quant_postprocess_device
+    )
+    if layerwise_quant_postprocess_device is not None and (
+        use_fsdp
+        or weight_postprocess_device is not None
+        or defer_cpu_placement
+        or not load_on_cpu
+        or weight_load_plan.checkpoint_load_device.type != "cpu"
+    ):
+        raise ValueError(
+            "Layerwise quantization postprocessing requires CPU-backed non-FSDP loading "
+            "without full-model device postprocessing"
+        )
     if use_fsdp and weight_postprocess_device is not None:
         logger.warning("Ignoring weight postprocess device override for FSDP loading.")
         weight_postprocess_device = None
@@ -482,7 +496,12 @@ def maybe_load_fsdp_model(
         # move to device to perform postprocessing
         _move_to_device_preserving_meta(model, weight_postprocess_device)
 
-    process_model_weights_after_loading(model)
+    if layerwise_quant_postprocess_device is None:
+        process_model_weights_after_loading(model)
+    else:
+        process_model_weights_after_loading(
+            model, process_device=layerwise_quant_postprocess_device
+        )
     model.post_load_weights()
 
     finalize_loaded_model(model)
