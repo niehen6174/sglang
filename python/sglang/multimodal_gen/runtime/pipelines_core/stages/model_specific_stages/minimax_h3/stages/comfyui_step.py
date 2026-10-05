@@ -737,6 +737,7 @@ class MiniMaxH3ComfyUIStepStage(PipelineStage):
     ) -> MiniMaxH3ComfyUIRunState:
         from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.stages.denoising import (
             _precompute_refined_prompt_embeds,
+            _precompute_rope_cache,
             _build_cube_attn_metadata,
         )
 
@@ -806,6 +807,7 @@ class MiniMaxH3ComfyUIStepStage(PipelineStage):
             _precompute_refined_prompt_embeds(
                 self.transformer, state.branch, device=device
             )
+            _precompute_rope_cache(self.transformer, state.branch, device=device)
             state.refined = True
         return state
 

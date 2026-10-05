@@ -749,6 +749,7 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
             if (
                 not current_platform.is_cpu()
                 and output_batch.output is None
+                and output_batch.noise_pred is None
                 and not req.return_raw_frames
             ):
                 with maybe_record_function("EMPTY_CACHE"):

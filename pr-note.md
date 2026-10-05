@@ -1,15 +1,12 @@
-# PR note: H3 / VDN ComfyUI support
+# PR note: H3 runtime performance
 
-Base: `edee4308bcd7204d550234189d52a4cc25d93348` (upstream checkout used for the API validation). Includes the previously staged serialized INT8 ConvRot loading bridge associated with upstream PR #42121, plus the subsequent integration fixes. Compare against this base, not an unrelated fork branch.
+Depends on `fix/comfyui-h3-support` at `801ef720efab31514f32d57d82adfda4742e0df6`. Review only the diff against that branch; merging the prerequisite first avoids unrelated feature changes in this review.
 
-## Changes
-- Load supported H3 serialized INT8 checkpoints and validate incompatible quantization/LoRA combinations.
-- Route integrated H3 through the native denoising-stage attention/cache/compile machinery; prepare sparse/cube and VDN hybrid metadata using the actual ComfyUI layout.
-- Propagate and validate SGLDOptions, model identity, offload and warmup behavior; reject unsupported integrated quality modes and CUDA graph/offload combinations clearly.
-- Implement real Sage3 packed-sequence execution and correct VDN configuration / example workflow options.
+- Preserve CUDA allocator caches for noise-prediction responses while retaining existing cleanup for other response types.
+- Precompute RoPE once per integrated sampler run, with the existing session-state lifecycle.
+- Keep legal packed QKV views for Sage2/3 when their final stride is one; materialize unsupported strides.
 
-## Validation and limits
-The complete local integration campaign recorded 125 API requests (101 successful, 22 expected rejections, 2 transport failures investigated), followed by focused regressions. Those totals describe the combined tested workspace, not an isolated rerun of this split branch. See the benchmark branch for methodology. VSA was not supported on RTX 5090 SM120. Official ComfyUI has no equivalent VDN hybrid branch. Cross-engine quality equivalence was not established.
+Validation on the complete final workspace: 266 passed / 1 skipped / 3 expected failures in the related regression suite, and eight actual GPU Sage stride cases passed. Same-seed default H3 T2AV, Ref2AV and VDN latent comparisons were bit-identical before/after. End-to-end gains from the default-path code optimizations were modest (roughly 1–2%); do not attribute the ~30% fast-config gain to this patch alone.
 
-This branch intentionally excludes allocator/RoPE/copy performance changes, model-patcher lifetime, MXFP8 staging, and returned timing fixes. The performance branch depends on this commit.
+The larger T2AV gain additionally uses Sage3 and `SGLANG_KITCHEN_INT8_MAX_ROWS=0`, a tested RTX 5090 deployment setting; this patch does not change that global default. Sage differs numerically from SDPA. No new eight-hour soak of this patch was performed.
 
