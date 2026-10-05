@@ -18,6 +18,11 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 
+def _kernel_input(value: torch.Tensor) -> torch.Tensor:
+    """Preserve fused QKV views supported by Sage's stride-aware kernels."""
+    return value if value.stride(-1) == 1 else value.contiguous()
+
+
 class SageAttention3Backend(AttentionBackend):
     accept_output_buffer: bool = True
 
@@ -122,9 +127,9 @@ class SageAttention3Impl(AttentionImpl):
             if start == stop:
                 continue
             output[start:stop] = self.forward(
-                query[start:stop].contiguous().unsqueeze(0),
-                key[start:stop].contiguous().unsqueeze(0),
-                value[start:stop].contiguous().unsqueeze(0),
+                _kernel_input(query[start:stop]).unsqueeze(0),
+                _kernel_input(key[start:stop]).unsqueeze(0),
+                _kernel_input(value[start:stop]).unsqueeze(0),
                 None,
             )[0]
         return output

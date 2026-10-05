@@ -740,6 +740,7 @@ class MiniMaxH3ComfyUIStepStage(PipelineStage):
             _build_cube_attn_metadata,
             _maybe_prepare_vsa_h3_step_metadata,
             _precompute_refined_prompt_embeds,
+            _precompute_rope_cache,
         )
 
         signature = (
@@ -819,6 +820,7 @@ class MiniMaxH3ComfyUIStepStage(PipelineStage):
             _precompute_refined_prompt_embeds(
                 self.transformer, state.branch, device=device
             )
+            _precompute_rope_cache(self.transformer, state.branch, device=device)
             state.refined = True
         return state
 
