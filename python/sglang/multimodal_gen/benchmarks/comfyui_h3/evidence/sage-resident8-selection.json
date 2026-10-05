@@ -1,0 +1,11 @@
+{
+  "resident_main_layers": 8,
+  "prefetch": 2,
+  "lifetime": "permanent",
+  "profile_passed": true,
+  "same_backend_bit_equal": true,
+  "short_probe_benefit_over_2_percent": false,
+  "production_hot_n": 0,
+  "recommend_comfy_fixed_prompt": false,
+  "native_hot_n": 0
+}

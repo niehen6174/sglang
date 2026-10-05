@@ -1,0 +1,10 @@
+{
+  "state": "Applied; CPU view tests and actual GPU kernel equivalence passed",
+  "cpu_before_failed": 4,
+  "cpu_before_passed": 4,
+  "gpu_pending": false,
+  "gpu_cases": 8,
+  "gpu_passed": 8,
+  "cpu_after_passed": 8,
+  "regression_total_passed": 266
+}

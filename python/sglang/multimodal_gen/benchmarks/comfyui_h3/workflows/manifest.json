@@ -1,0 +1,30 @@
+{
+  "t2av_sdpa": {
+    "verified_case": "t2av_optimized_plain_native",
+    "note": "保留当前模型计算后端；本轮代码优化及原生 CUDA 分配器已复测。"
+  },
+  "ref2av_sdpa": {
+    "verified_case": "ref2av_optimized_plain_native",
+    "note": "保留当前模型计算后端；本轮代码优化及原生 CUDA 分配器已复测。"
+  },
+  "vdn_bf16": {
+    "verified_case": "vdn_optimized_plain_native",
+    "note": "保留当前模型计算后端；本轮代码优化及原生 CUDA 分配器已复测。"
+  },
+  "t2av_fast_attention": {
+    "verified_case": "t2av_fast_attention_plain_native",
+    "note": "快速注意力正式复测；与 SDPA 数值不同。"
+  },
+  "t2av_fast_gpu_encoder": {
+    "verified_case": "t2av_fast_gpu_te_plain_native",
+    "note": "快速注意力和 GPU 编码组合，包含每次更换提示词的 5 个热态请求；GPU/CPU 编码数值不同。"
+  },
+  "vdn_mxfp8_optional": {
+    "verified_case": "vdn_fp8_plain_native",
+    "note": "在线 MXFP8 量化正式复测；与 BF16 潜变量变化较大，需按自己的内容做画质与音频评估。"
+  },
+  "t2av_fast_attention_unsplit": {
+    "verified_case": "t2av_unsplit_fast_plain_native",
+    "note": "RTX 5090 正式复测的 INT8 完整矩阵变体。启动时另设置 SGLANG_KITCHEN_INT8_MAX_ROWS=0；该环境参数不是 SGLDOptions 字段。"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "state": "applied",
+  "patch": "performance-fix.patch",
+  "regressions_passed": 266,
+  "regressions_skipped": 1,
+  "regressions_xfailed": 3,
+  "gpu_sage_stride_equivalence_passed": 8,
+  "production_timing_pending": false,
+  "default_backend_same_seed_bit_equal": [
+    "t2av",
+    "ref2av",
+    "vdn"
+  ],
+  "unwrapped_sampler_bit_equal": {
+    "t2av": {
+      "audio": true,
+      "video": true
+    },
+    "ref2av": {
+      "audio": true,
+      "video": true
+    }
+  }
+}

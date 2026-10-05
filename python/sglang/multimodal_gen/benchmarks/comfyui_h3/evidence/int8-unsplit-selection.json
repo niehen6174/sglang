@@ -1,0 +1,11 @@
+{
+  "rows": 0,
+  "same_backend_bit_equal": true,
+  "short_probe_benefit_over_2_percent": true,
+  "production_pending": false,
+  "production_hot_n": 5,
+  "production_benefit_over_2_percent": true,
+  "recommend_unsplit": true,
+  "production_wall_median": 36.66055022738874,
+  "control_wall_median": 38.092818511649966
+}
