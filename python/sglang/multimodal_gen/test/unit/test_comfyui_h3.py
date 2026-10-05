@@ -1098,3 +1098,293 @@ def test_concat_qkv_attention_skips_grouped_weight_loader() -> None:
     grouped_weight = grouped_attn.qkv_proj.weight
     assert grouped_weight.checkpoint_mapping_unsafe is True
     assert grouped_weight.rank_local_weight_transform is not None
+
+
+def test_integrated_h3_int8_loader_preserves_quantized_weights(tmp_path, monkeypatch):
+    _ensure_single_process_parallel_runtime()
+    import json
+    from types import SimpleNamespace
+
+    from safetensors.torch import save_file
+
+    from sglang.multimodal_gen.configs.models.dits.minimax_h3 import MiniMaxH3DiTConfig
+    from sglang.multimodal_gen.runtime.layers.linear import ReplicatedLinear
+    from sglang.multimodal_gen.runtime.loader.comfyui_checkpoints import spec
+    from sglang.multimodal_gen.runtime.loader.comfyui_checkpoints.minimax_h3 import (
+        _build_dit_config,
+    )
+
+    class SmallH3(torch.nn.Module):
+        param_names_mapping = {}
+        _fsdp_forward_methods = ()
+
+        def __init__(self, config, hf_config, quant_config=None):
+            super().__init__()
+            self.proj = ReplicatedLinear(
+                256,
+                12,
+                bias=False,
+                params_dtype=torch.bfloat16,
+                quant_config=quant_config,
+                prefix="proj",
+            )
+
+        def post_load_weights(self):
+            pass
+
+    marker = {"format": "int8_tensorwise", "convrot": True, "convrot_groupsize": 256}
+    weight = torch.arange(12 * 256).reshape(12, 256).to(torch.int8)
+    scales = torch.arange(1, 13, dtype=torch.float32).reshape(12, 1)
+    path = tmp_path / "h3.safetensors"
+    save_file(
+        {
+            "proj.weight": weight,
+            "proj.weight_scale": scales,
+            "proj.comfy_quant": torch.tensor(
+                list(json.dumps(marker).encode()), dtype=torch.uint8
+            ),
+        },
+        path,
+    )
+    monkeypatch.setattr(
+        spec.ModelRegistry, "resolve_model_cls", lambda _: (SmallH3, None)
+    )
+    monkeypatch.setattr(spec, "get_local_torch_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(
+        spec,
+        "get_comfyui_checkpoint_spec",
+        lambda _: spec.ComfyUICheckpointSpec(
+            dit_cls_name="MiniMaxH3DiTModel", build_dit_config=_build_dit_config
+        ),
+    )
+    monkeypatch.setattr(
+        "sglang.multimodal_gen.runtime.layers.quantization.kitchen_int8._load_comfy_kitchen",
+        lambda: None,
+    )
+    arguments = SimpleNamespace(
+        pipeline_config=SimpleNamespace(
+            dit_config=MiniMaxH3DiTConfig(), dit_precision="bf16"
+        ),
+        model_paths={},
+        transformer_weights_path=None,
+        component_weights_paths={},
+        model_path=str(path),
+        dit_precision="bf16",
+        component_precisions={},
+        quantization=None,
+        nunchaku_config=None,
+        hsdp_replicate_dim=1,
+        hsdp_shard_dim=1,
+        pin_cpu_memory=False,
+        should_start_component_on_cpu=lambda _: True,
+        should_use_fsdp_for_component=lambda _: False,
+    )
+    pipeline = SimpleNamespace(
+        pipeline_name="MiniMaxH3Pipeline",
+        model_path=str(path),
+        get_module=lambda _: None,
+    )
+    loaded = spec.load_comfyui_transformer(pipeline, arguments)["transformer"]
+    assert loaded.proj.weight.dtype == torch.int8
+    assert torch.equal(loaded.proj.weight, weight)
+    assert torch.equal(loaded.proj.weight_scale, scales)
+    assert loaded.proj.quant_method.is_checkpoint_serialized
+    assert (
+        arguments.pipeline_config.dit_config.arch_config.qkv_checkpoint_grouped is False
+    )
+    assert all(not parameter.requires_grad for parameter in loaded.parameters())
+    arguments.quantization = "kitchen_int8"
+    with pytest.raises(ValueError, match="per-layer metadata"):
+        spec.load_comfyui_transformer(pipeline, arguments)
+    arguments.quantization = None
+    arguments.should_use_fsdp_for_component = lambda _: True
+    with pytest.raises(ValueError, match="FSDP"):
+        spec.load_comfyui_transformer(pipeline, arguments)
+
+
+def test_comfyui_sparse_stream_layout_preserves_target_and_condition_roles():
+    layout = ComfyUIPackedLayout(
+        3,
+        2,
+        8,
+        12,
+        4,
+        keyframes=[{"resolved_frame_index": 0, "latent": torch.zeros(1, 24, 1, 8, 12)}],
+    )
+    packed = comfyui_layout_to_packed(serialize_comfyui_layout(layout))
+    assert packed["stream_layout"]["target_shape"] == (2, 4, 6)
+    assert packed["stream_layout"]["cond_image_shapes"] == ((1, 4, 6),)
+    assert packed["stream_layout"]["cond_image_roles"] == ("joint_cube",)
+    assert packed["stream_layout"]["cond_event_orders"] == (("imgvid", 0),)
+    assert packed["video_pos"].numel() == 2 * 4 * 6
+    assert not torch.isin(
+        packed["video_pos"], packed["img_pos"][~packed["update_mask"]]
+    ).any()
+
+
+def test_h3_deferred_component_backend_wins_over_global_default(monkeypatch):
+    from types import SimpleNamespace
+    import sglang.multimodal_gen.runtime.models.dits.minimax_h3 as module
+    from sglang.multimodal_gen.runtime.platforms.interface import AttentionBackendEnum
+
+    seen = []
+    monkeypatch.setattr(
+        module,
+        "get_global_forced_attn_backend",
+        lambda: AttentionBackendEnum.TORCH_SDPA,
+    )
+
+    def backend(*args, **kwargs):
+        seen.append(kwargs["selected_attention_backend"])
+        return SimpleNamespace(get_enum=lambda: kwargs["selected_attention_backend"])
+
+    monkeypatch.setattr(module, "get_attn_backend", backend)
+    model = SimpleNamespace(
+        _resolved_attention_backend=None,
+        _component_attention_backend_override=AttentionBackendEnum.CUBE_SPARSE_ATTN,
+        arch=SimpleNamespace(attention_head_dim=128),
+        modules=lambda: [],
+    )
+    module.MiniMaxH3DiTModel._resolve_attention_backend_once(model)
+    assert seen == [AttentionBackendEnum.CUBE_SPARSE_ATTN]
+    assert model._resolved_attention_backend is AttentionBackendEnum.CUBE_SPARSE_ATTN
+
+
+@pytest.mark.parametrize("model_type,nfe", [("fast_h3", 4), ("vdn_h3", 8)])
+def test_distilled_h3_rejects_wrong_grid_and_reference_task(model_type, nfe):
+    from types import SimpleNamespace
+    from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.executors.minimax_h3 import (
+        validate_distilled_h3_step,
+    )
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.time_request import (
+        minimax_h3_time_shift_sigmas,
+    )
+
+    sigmas = torch.tensor(
+        minimax_h3_time_shift_sigmas(num_steps=nfe + 1, shift_scale=12.0)
+    )
+    packed = SimpleNamespace(extra_req={"h3_sample_sigmas": sigmas})
+    validate_distilled_h3_step(packed, model_type)
+    packed.extra_req["h3_sample_sigmas"] = torch.linspace(1, 0, nfe + 1)
+    with pytest.raises(ValueError, match="trained"):
+        validate_distilled_h3_step(packed, model_type)
+    packed.extra_req.update(
+        h3_sample_sigmas=sigmas, h3_payload={"refs": [{"kind": "image"}]}
+    )
+    with pytest.raises(ValueError, match="reference"):
+        validate_distilled_h3_step(packed, model_type)
+
+
+def test_comfyui_h3_bcg_support_uses_detected_architecture_not_filename():
+    from types import SimpleNamespace
+    from sglang.multimodal_gen.configs.pipeline_configs.minimax_h3 import (
+        MiniMaxH3PipelineConfig,
+    )
+    from sglang.multimodal_gen.runtime.server_args import ServerArgs
+
+    args = SimpleNamespace(
+        comfyui_mode=True,
+        pipeline_config=MiniMaxH3PipelineConfig(),
+        model_id=None,
+        model_path="/models/arbitrary-int8-name.safetensors",
+    )
+    assert ServerArgs._is_breakable_cuda_graph_supported_model(args)
+    args.comfyui_mode = False
+    assert not ServerArgs._is_breakable_cuda_graph_supported_model(args)
+
+
+def test_h3_carried_audio_matches_comfyui_without_double_sigma_derivative():
+    adapter = MiniMaxH3Adapter()
+    video = torch.ones(1, 24, 2, 4, 4)
+    audio = torch.ones(1, 32, 2, 3)
+    packed = adapter.pack(
+        [video, audio],
+        torch.tensor([1000.0]),
+        torch.ones(1, 4, 8),
+        minimax_payload={"audio_scale": 4.0},
+    )
+    out = adapter.unpack(
+        [torch.ones_like(video), torch.ones_like(audio)], packed, [video, audio]
+    )
+    # ComfyUI forward: (1 - scale) * input + scale * (-raw velocity).
+    # At sigma_v=sigma_a=1 this is -3 - 4=-7; another derivative gives -28.
+    assert torch.equal(out[1], torch.full_like(audio, -7))
+
+
+def test_h3_masked_velocities_match_comfyui_before_audio_carry_transform():
+    adapter = MiniMaxH3Adapter()
+    video = torch.ones(1, 24, 2, 4, 4)
+    audio = torch.ones(1, 32, 2, 3)
+    packed = adapter.pack(
+        [video, audio],
+        torch.tensor([1000.0]),
+        torch.ones(1, 4, 8),
+        minimax_payload={"audio_scale": 4.0},
+        denoise_mask=torch.full((1, 1, 2, 4, 4), 0.25),
+        audio_denoise_mask=torch.zeros(1, 1, 2, 3),
+    )
+    out = adapter.unpack(
+        [torch.ones_like(video), torch.ones_like(audio)], packed, [video, audio]
+    )
+    assert torch.equal(out[0], torch.full_like(video, -0.25))
+    assert torch.equal(out[1], torch.full_like(audio, -3))
+
+
+def test_comfyui_h3_rejects_bcg_with_offload_before_cuda_capture():
+    from types import SimpleNamespace
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.stages.comfyui_step import (
+        MiniMaxH3ComfyUIStepStage,
+    )
+    import pytest
+
+    batch = SimpleNamespace(sampling_params=SimpleNamespace(quality="lossless"))
+    args = SimpleNamespace(
+        enable_breakable_cuda_graph=True, is_dit_layerwise_offload_selected=True
+    )
+    with pytest.raises(ValueError, match="copy-stream events"):
+        MiniMaxH3ComfyUIStepStage.forward(None, batch, args)
+
+
+def test_sage3_packed_sequences_and_inactive_trailing_padding(monkeypatch):
+    import pytest
+
+    pytest.importorskip("sageattn3")
+    from sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn3 import (
+        SageAttention3Impl,
+        SageAttention3Backend,
+    )
+
+    impl = SageAttention3Impl(1, 64, False, 0.125, packed_trailing_padding=True)
+    calls = []
+
+    def fake_kernel(query, key, value, metadata):
+        calls.append(query.shape[1])
+        return query + query.mean(dim=1, keepdim=True)
+
+    monkeypatch.setattr(impl, "forward", fake_kernel)
+    q = torch.arange(6 * 64, dtype=torch.float32).view(6, 1, 64)
+    out = impl.forward_varlen(
+        q,
+        q,
+        q,
+        cu_seqlens=torch.tensor([0, 4, 6]),
+        max_seqlen=4,
+        cu_seqlens_host=(0, 4, 6),
+    )
+    assert SageAttention3Backend.supports_packed_varlen()
+    assert calls == [4]
+    assert torch.count_nonzero(out[4:]) == 0
+    assert torch.equal(out[:4], q[:4] + q[:4].mean(dim=0, keepdim=True))
+    calls.clear()
+    impl.packed_trailing_padding = False
+    out = impl.forward_varlen(
+        q,
+        q,
+        q,
+        cu_seqlens=torch.tensor([0, 2, 2, 6]),
+        max_seqlen=4,
+        cu_seqlens_host=(0, 2, 2, 6),
+    )
+    assert calls == [2, 4]
+    assert torch.equal(out[:2], q[:2] + q[:2].mean(dim=0, keepdim=True))
+    assert torch.equal(out[2:], q[2:] + q[2:].mean(dim=0, keepdim=True))

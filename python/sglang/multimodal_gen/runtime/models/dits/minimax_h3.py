@@ -2211,8 +2211,8 @@ class MiniMaxH3DiTModel(SpectrumMixin, BaseDiT, LayerwiseOffloadableModuleMixin)
         if self._resolved_attention_backend is not None:
             return
         selected_backend = (
-            get_global_forced_attn_backend()
-            or self._component_attention_backend_override
+            self._component_attention_backend_override
+            or get_global_forced_attn_backend()
         )
         if selected_backend is None:
             selected_backend = next(

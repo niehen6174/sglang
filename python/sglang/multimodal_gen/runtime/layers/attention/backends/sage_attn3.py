@@ -10,6 +10,7 @@ from sglang.multimodal_gen.runtime.layers.attention.backends.attention_backend i
     AttentionBackend,
     AttentionImpl,
     AttentionMetadata,
+    trailing_padding_used_len,
 )
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
@@ -53,6 +54,9 @@ class SageAttention3Impl(AttentionImpl):
         self.causal = causal
         self.softmax_scale = softmax_scale
         self.dropout = extra_impl_args.get("dropout_p", 0.0)
+        self.packed_trailing_padding = extra_impl_args.get(
+            "packed_trailing_padding", False
+        )
 
     def forward(
         self,
@@ -89,4 +93,38 @@ class SageAttention3Impl(AttentionImpl):
         else:
             output = sageattn3_blackwell(query, key, value, is_causal=self.causal)
         output = output.transpose(1, 2)
+        return output
+
+    def forward_varlen(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        cu_seqlens_host: tuple[int, ...] | None = None,
+    ) -> torch.Tensor:
+        """Run the real Blackwell kernel independently on each packed sequence."""
+        bounds = (
+            cu_seqlens_host
+            if cu_seqlens_host is not None
+            else tuple(int(x) for x in cu_seqlens.tolist())
+        )
+        used = (
+            trailing_padding_used_len(query.shape[0], max_seqlen, bounds)
+            if self.packed_trailing_padding
+            else None
+        )
+        output = torch.zeros_like(query)
+        spans = ((0, used),) if used is not None else zip(bounds[:-1], bounds[1:])
+        for start, stop in spans:
+            if start == stop:
+                continue
+            output[start:stop] = self.forward(
+                query[start:stop].contiguous().unsqueeze(0),
+                key[start:stop].contiguous().unsqueeze(0),
+                value[start:stop].contiguous().unsqueeze(0),
+                None,
+            )[0]
         return output
