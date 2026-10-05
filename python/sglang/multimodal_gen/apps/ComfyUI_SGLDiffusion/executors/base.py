@@ -47,7 +47,7 @@ class SGLDiffusionExecutor(torch.nn.Module):
 
     def set_lora(self, lora_nickname=None, lora_path=None, strength=None, target=None):
         """Set LoRA adapter using SGLang Diffusion API."""
-        self._lora_input = {
+        desired = {
             "lora_nickname": lora_nickname,
             "lora_path": lora_path,
             "strength": strength,
@@ -60,6 +60,7 @@ class SGLDiffusionExecutor(torch.nn.Module):
                 strength=strength,
                 target=target,
             )
+        self._lora_input = desired
 
     def begin_sampler_run(self) -> None:
         """One ComfyUI ``sampler.sample()`` invocation is one cache lifetime."""
@@ -70,6 +71,23 @@ class SGLDiffusionExecutor(torch.nn.Module):
         """Run cache is evicted on the next bind of a newer id for this executor."""
 
     def sampler_sample_wrapper(self, executor, *args, **kwargs):
+        ensure = getattr(self, "_ensure_runtime", None)
+        if ensure is not None:
+            ensure(self)
+        model_wrap = args[0] if args else kwargs.get("model_wrap")
+        patcher = getattr(model_wrap, "model_patcher", None)
+        if patcher is not None:
+            flags = patcher.model_options.get("sgld_request_flags", {})
+            self.enable_cache_dit = flags.get("enable_cache_dit")
+            self.cache_dit_params = flags.get("cache_dit_params")
+            self.request_options = dict(flags.get("request_options", {}))
+            desired = patcher.model_options.get("sgld_lora_input")
+            if desired != self._lora_input:
+                if self._lora_input is not None:
+                    self.generator.unmerge_lora_weights()
+                    self._lora_input = None
+                if desired is not None:
+                    self.set_lora(**desired)
         self.begin_sampler_run()
         try:
             return executor(*args, **kwargs)
@@ -140,6 +158,8 @@ class SGLDiffusionExecutor(torch.nn.Module):
             torch.Generator("cuda") for _ in range(req.num_outputs_per_prompt)
         ]
         output_batch = self.generator._send_to_scheduler_and_wait_for_response([req])
+        if output_batch.error:
+            raise RuntimeError(f"SGLang Diffusion worker failed: {output_batch.error}")
         return self.adapter.unpack(output_batch.noise_pred, packed, x)
 
     def forward(self, x, timestep, context, **kwargs):

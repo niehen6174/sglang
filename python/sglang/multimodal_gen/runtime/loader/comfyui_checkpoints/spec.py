@@ -250,6 +250,16 @@ def load_comfyui_transformer(
         quant_config = None
         checkpoint_key_filter = None
         weight_load_plan = None
+        if spec.dit_cls_name == "MiniMaxH3DiTModel" and (
+            getattr(server_args, "minimax_h3_adaln_online", False)
+            or getattr(server_args, "minimax_h3_adaln_cache_path", None) is not None
+        ):
+            raise ValueError(
+                "ComfyUI H3 checkpoint loading does not support native AdaLN "
+                "online/sidecar caches: their builder reads native checkpoint "
+                "tensor names. Use the standard AdaLN projections or a native "
+                "MiniMax H3 runtime with a supported native-layout checkpoint."
+            )
         # GGUF already sets AdaLN curve from tensor meta. Pruned BF16
         # safetensors keep the same adaln_t_table; without this the DiT is
         # built as the unpruned MLP and load fails on that extra parameter.
@@ -285,6 +295,26 @@ def load_comfyui_transformer(
                 )
                 weight_load_plan = WeightLoadPlan(
                     checkpoint_load_device=checkpoint_device
+                )
+            if not layer_markers and server_args.quantization is not None:
+                if server_args.quantization != "convrot_int8":
+                    raise ValueError(
+                        "ComfyUI H3 floating-point checkpoints currently support "
+                        "runtime convrot_int8 quantization only"
+                    )
+                from sglang.multimodal_gen.runtime.layers.quantization.configs.convrot_int8_config import (
+                    ConvRotInt8Config,
+                )
+
+                quant_config = ConvRotInt8Config(
+                    ignored_layers=server_args.quantization_ignored_layers
+                )
+                weight_load_plan = WeightLoadPlan(
+                    checkpoint_load_device=(
+                        torch.device("cpu")
+                        if server_args.should_start_component_on_cpu("transformer")
+                        else get_local_torch_device()
+                    )
                 )
             if adaln_curve_shape is not None:
                 (
