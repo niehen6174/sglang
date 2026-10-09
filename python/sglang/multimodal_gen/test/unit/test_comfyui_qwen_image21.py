@@ -426,6 +426,7 @@ def _stage(monkeypatch, free_gpu=1 << 40):
         current_model(hidden_states=latent_model_input, **kw)
     )
     monkeypatch.setattr(stage_mod, "_free_memory", lambda device: (free_gpu, 1 << 40))
+    monkeypatch.setattr(stage_mod, "get_sp_world_size", lambda: 1)
     return stage, fake
 
 
@@ -573,7 +574,9 @@ def test_pipeline_installs_comfyui_step_stage(monkeypatch) -> None:
             self.stages.append(stage)
 
     pipe = _Pipe()
-    QwenImage21Pipeline.create_comfyui_stages(pipe, server_args=None)
+    QwenImage21Pipeline.create_comfyui_stages(
+        pipe, server_args=SimpleNamespace(enable_cfg_parallel=False)
+    )
     assert [type(s) for s in pipe.stages] == [QwenImage21ComfyUIStepStage]
     assert created["modules"] == (
         pipe.modules["transformer"],
@@ -582,3 +585,124 @@ def test_pipeline_installs_comfyui_step_stage(monkeypatch) -> None:
     assert (
         QwenImage21Pipeline.pipeline_config_cls.__name__ == "QwenImage21PipelineConfig"
     )
+    with pytest.raises(ValueError, match="cfg_parallel"):
+        QwenImage21Pipeline.create_comfyui_stages(
+            _Pipe(), server_args=SimpleNamespace(enable_cfg_parallel=True)
+        )
+
+
+# ----- multi-GPU -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"enable_cfg_parallel": True}, {"cfg_parallel_degree": 2}],
+)
+def test_cfg_parallel_is_rejected_before_the_worker_starts(options) -> None:
+    """ComfyUI owns CFG, so a CFG rank would only recompute the same DiT call."""
+    with pytest.raises(ValueError, match="does not apply"):
+        QwenImage21Executor.validate_sgld_options({"num_gpus": 2, **options})
+    QwenImage21Executor.validate_sgld_options({"num_gpus": 2, "sp_degree": 2})
+    QwenImage21Executor.validate_sgld_options(None)
+
+
+def test_sp_needs_a_token_count_divisible_by_the_sp_degree(monkeypatch) -> None:
+    """An odd latent grid under SP used to fail deep in the DiT as a None noise_pred."""
+    stage, fake = _stage(monkeypatch)
+    monkeypatch.setattr(stage_mod, "get_sp_world_size", lambda: 2)
+    payload = {"image_slots": [], "ref_latents": [], "prefix_cache": "auto"}
+    try:
+        with pytest.raises(ValueError, match="3969 tokens"):
+            stage.forward(
+                _req(
+                    "sp:1",
+                    "k",
+                    torch.randn(1, 64, 63, 63),
+                    1.0,
+                    torch.randn(1, 3, 16),
+                    payload,
+                ),
+                None,
+            )
+        stage.forward(
+            _req(
+                "sp:1",
+                "k",
+                torch.randn(1, 64, 63, 64),
+                1.0,
+                torch.randn(1, 3, 16),
+                payload,
+            ),
+            None,
+        )
+        assert fake.calls
+    finally:
+        release_comfyui_session("sp:1")
+
+
+def test_prefix_cache_placement_is_agreed_across_ranks(monkeypatch) -> None:
+    """Under TP an uncached prefix runs extra all-reduces, so ranks must not split."""
+    seen = {}
+
+    def all_reduce(tensor, op=None, group=None):
+        seen["group"] = group
+        tensor.copy_(torch.minimum(tensor, torch.tensor([3, 5])))
+
+    monkeypatch.setattr(stage_mod, "world_group_is_initialized", lambda: True)
+    monkeypatch.setattr(
+        stage_mod,
+        "get_world_group",
+        lambda: SimpleNamespace(world_size=2, cpu_group="cpu-group"),
+    )
+    monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
+    free_gpu, free_host = stage_mod._free_memory(torch.device("cpu"))
+    assert (free_gpu, free_host) == (0, 5)
+    assert seen["group"] == "cpu-group"
+
+
+def test_failed_worker_step_raises_with_the_worker_error(monkeypatch) -> None:
+    """A worker-side exception returns noise_pred=None; it must not become AttributeError."""
+    from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.executors import base
+
+    config = SimpleNamespace(unet_config={"dtype": torch.bfloat16})
+    generator = SimpleNamespace(
+        server_args=None,
+        _send_to_scheduler_and_wait_for_response=lambda reqs: SimpleNamespace(
+            noise_pred=None, error="boom on rank 0"
+        ),
+    )
+    executor = QwenImage21Executor(generator, "m.safetensors", object(), config)
+    monkeypatch.setattr(
+        base.SamplingParams, "from_user_sampling_params_args", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        base,
+        "prepare_request",
+        lambda **k: SimpleNamespace(extra={}, num_outputs_per_prompt=1),
+    )
+    monkeypatch.setattr(base.torch, "Generator", lambda device: None)
+    x = torch.randn(1, 64, 2, 2)
+    packed = executor.adapter.pack(x, torch.tensor([1.0]), torch.randn(1, 3, 8))
+    with pytest.raises(RuntimeError, match="boom on rank 0"):
+        executor._execute_packed(packed, x, torch.tensor([1.0]))
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="ServerArgs checks num_gpus")
+def test_comfyui_mode_never_auto_enables_cfg_parallel(tmp_path, monkeypatch) -> None:
+    """num_gpus=2 alone looked up model_index.json for a single-file DiT and failed."""
+    from sglang.multimodal_gen.runtime.server_args import ServerArgs
+
+    def must_not_run(self):
+        raise AssertionError("default-CFG lookup in comfyui_mode")
+
+    monkeypatch.setattr(ServerArgs, "_model_default_uses_cfg", must_not_run)
+    dit = tmp_path / "dit.safetensors"
+    dit.write_bytes(b"")
+    args = ServerArgs.from_kwargs(
+        model_path=str(dit),
+        pipeline_class_name="QwenImage21Pipeline",
+        comfyui_mode=True,
+        num_gpus=2,
+    )
+    assert not args.enable_cfg_parallel
+    assert args.sp_degree == 2

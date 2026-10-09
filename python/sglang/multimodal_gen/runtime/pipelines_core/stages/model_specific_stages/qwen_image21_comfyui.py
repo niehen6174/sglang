@@ -16,6 +16,11 @@ from typing import Any
 import msgspec
 import torch
 
+from sglang.multimodal_gen.runtime.distributed import get_sp_world_size
+from sglang.multimodal_gen.runtime.distributed.parallel_state import (
+    get_world_group,
+    world_group_is_initialized,
+)
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
 from sglang.multimodal_gen.runtime.pipelines_core.comfyui_mode import (
     begin_comfyui_run,
@@ -262,7 +267,18 @@ def _free_memory(device) -> tuple[int, int]:
         free_gpu = torch.cuda.mem_get_info(device)[0] + (
             torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
         )
-    return free_gpu, int(psutil.virtual_memory().available)
+    free = (free_gpu, int(psutil.virtual_memory().available))
+    if world_group_is_initialized() and get_world_group().world_size > 1:
+        # Every rank must take the same cached / recompute path: under TP the
+        # uncached prefix runs extra all-reduces, so a split decision hangs.
+        agreed = torch.tensor(free, dtype=torch.int64)
+        torch.distributed.all_reduce(
+            agreed,
+            op=torch.distributed.ReduceOp.MIN,
+            group=get_world_group().cpu_group,
+        )
+        free = tuple(int(v) for v in agreed.tolist())
+    return free
 
 
 class QwenImage21ComfyUIStepStage(QwenImage21DenoisingStage):
@@ -374,8 +390,16 @@ class QwenImage21ComfyUIStepStage(QwenImage21DenoisingStage):
             raise ValueError(
                 "Qwen-Image 2.1 ComfyUI step expects latents shaped [B, C, H, W]"
             )
-        cond = self._cond_for_step(batch, latents)
         bsz, _, height, width = latents.shape
+        sp = get_sp_world_size()
+        if (height * width) % sp:
+            raise ValueError(
+                f"Qwen-Image 2.1 sequence parallelism splits the {height}x{width} "
+                f"latent ({height * width} tokens) across {sp} ranks, which needs a "
+                f"token count divisible by {sp}; pick a width or height that is a "
+                "multiple of 32 pixels, or run without sp_degree"
+            )
+        cond = self._cond_for_step(batch, latents)
         timestep = batch.timesteps.to(device=latents.device, dtype=torch.float32)
         timestep = timestep.reshape(-1).expand(bsz).contiguous()
         hidden_states = (
