@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Code adapted from SGLang https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/lora/layers.py
 import os
+import zlib
 
 import torch
 from torch import nn
@@ -29,6 +30,7 @@ from sglang.multimodal_gen.runtime.layers.linear import (
     RowParallelLinear,
     UnquantizedLinearMethod,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.fp8 import Fp8LinearMethod
 from sglang.multimodal_gen.runtime.layers.quantization.weight_only_fp8 import (
     WeightOnlyFP8Linear,
 )
@@ -40,6 +42,7 @@ from sglang.multimodal_gen.runtime.managers.forward_context import (
 )
 from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload import (
     write_dense_weight,
+    write_offload_params,
 )
 from sglang.multimodal_gen.runtime.utils.precision import get_mixed_precision_state
 
@@ -56,6 +59,50 @@ LoRAWeightEntry = tuple[
     int | None,
     torch.nn.Parameter | None,
 ]
+
+
+FP8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
+
+
+def is_requantizable_fp8(layer: nn.Module) -> bool:
+    """Static per-tensor FP8 linear whose LoRA merge can be requantized."""
+    method = getattr(layer, "quant_method", None)
+    # Each TP rank requantizes its own shard with its own per-tensor scale.
+    return (
+        isinstance(method, Fp8LinearMethod)
+        and not method.block_quant
+        and not method.use_marlin
+    )
+
+
+def stochastic_round_to_fp8(
+    x: torch.Tensor, generator: torch.Generator
+) -> torch.Tensor:
+    """Unbiased rounding of fp32 ``x`` (already in range) to float8_e4m3fn.
+
+    A LoRA delta is usually far below half an FP8 step, so round-to-nearest
+    would snap most merged weights back to their base value and erase the
+    adapter; rounding up with probability proportional to the remainder keeps
+    it in expectation (as ComfyUI does when it patches FP8 weights).
+    """
+    x = x.clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX)
+    nearest = x.to(torch.float8_e4m3fn)
+    nearest_f = nearest.to(torch.float32)
+    remainder = x - nearest_f
+    side = torch.where(nearest_f != 0, torch.sign(nearest_f), torch.sign(x))
+    away_from_zero = remainder * side > 0
+    bits = nearest.view(torch.uint8).to(torch.int32)
+    # float8_e4m3fn is sign-magnitude; 0x7E is the largest finite magnitude.
+    magnitude = torch.where(away_from_zero, (bits & 0x7F) + 1, (bits & 0x7F) - 1)
+    sign_bit = torch.where(side < 0, 0x80, 0)
+    neighbor_bits = (sign_bit | magnitude.clamp(0, 0x7E)).to(torch.uint8)
+    neighbor_f = neighbor_bits.view(torch.float8_e4m3fn).to(torch.float32)
+    gap = (neighbor_f - nearest_f).abs()
+    prob = torch.where(gap > 0, remainder.abs() / gap.clamp(min=1e-30), 0.0)
+    draw = torch.rand(x.shape, device=x.device, generator=generator)
+    take = (remainder != 0) & (draw < prob)
+    out = torch.where(take, neighbor_bits, bits.to(torch.uint8))
+    return out.view(torch.float8_e4m3fn)
 
 
 def _compute_lora_delta(
@@ -117,6 +164,10 @@ class BaseLayerWithLoRA(nn.Module):
         self.lora_B = None
         self.lora_output_offset = None
         self.has_lora_output_offset = False
+        # Unmerge snapshot of a requantized FP8 layer's per-tensor scale.
+        self.cpu_weight_scale: torch.Tensor | None = None
+        # Module path in the DiT; seeds the FP8 requantization rounding.
+        self.layer_name: str = ""
 
     @property
     def weight(self):
@@ -145,6 +196,11 @@ class BaseLayerWithLoRA(nn.Module):
         if isinstance(self.base_layer, LinearBase):
             return isinstance(self.base_layer.quant_method, UnquantizedLinearMethod)
         return True
+
+    @property
+    def can_requant_merge(self) -> bool:
+        """Whether merge mode may fold the delta into FP8 storage by requantizing."""
+        return is_requantizable_fp8(self.base_layer)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Layerwise rebinds Parameter.data; do not compile the merged path.
@@ -563,6 +619,9 @@ class BaseLayerWithLoRA(nn.Module):
                 mp_policy=mp_policy,
                 offload_policy=offload_policy,
             )
+        elif not self.can_merge_base_weight and self.can_requant_merge:
+            self._merge_fp8_requant(lora_list)
+            return
         else:
             src, _ = self._materialized_weight_src()
             data = src.to(get_local_torch_device())
@@ -592,6 +651,52 @@ class BaseLayerWithLoRA(nn.Module):
         write_dense_weight(self.base_layer, merged)
         self.merged = True
 
+    def _materialized_weight_scale(self) -> torch.Tensor:
+        packed = getattr(self.base_layer, "_packed_weight_scale_cpu", None)
+        if packed is not None:
+            return packed
+        return self.base_layer.weight_scale.data
+
+    def _write_fp8_weight(self, weight: torch.Tensor, scale: torch.Tensor) -> None:
+        """Write [in, out] FP8 storage and its scale to the offload store or the layer."""
+        base = self.base_layer
+        if write_offload_params(base, {"weight": weight, "weight_scale": scale}):
+            return
+        base.weight.data.copy_(weight.to(base.weight.device))
+        base.weight_scale.data.copy_(scale.to(base.weight_scale.device))
+
+    @torch.no_grad()
+    def _merge_fp8_requant(self, lora_list: list[LoRAWeightEntry]) -> None:
+        """Dequantize, add the deltas in fp32, requantize with a fresh per-tensor scale.
+
+        Rounding is stochastic with a per-layer seed, so a merge is reproducible.
+        """
+        self._ensure_base_snapshot_owned()
+        scale_src = self._materialized_weight_scale()
+        if self.cpu_weight_scale is None:
+            self.cpu_weight_scale = scale_src.detach().to("cpu", copy=True)
+        device = get_local_torch_device()
+        # Fp8LinearMethod stores the processed weight as weight.t(), [in, out].
+        src, _ = self._materialized_weight_src()
+        stored = src.to(device)
+        scale = scale_src.to(device=device, dtype=torch.float32)
+        data = stored.t().to(torch.float32)
+        data.mul_(scale.reshape(-1, 1) if scale.numel() > 1 else scale.reshape(()))
+        self._merge_lora_into_data(data, lora_list)
+        new_scale = (data.abs().amax() / FP8_E4M3_MAX).clamp(min=1e-12)
+        generator = torch.Generator(device=device)
+        generator.manual_seed(zlib.crc32(self.layer_name.encode()))
+        data.div_(new_scale)
+        quantized = torch.empty_like(data, dtype=stored.dtype)
+        rows = max(1, LORA_MERGE_CHUNK_BYTES // (data.shape[-1] * data.element_size()))
+        for start in range(0, data.shape[0], rows):
+            quantized[start : start + rows] = stochastic_round_to_fp8(
+                data[start : start + rows], generator
+            ).to(stored.dtype)
+        del data
+        self._write_fp8_weight(quantized.t(), torch.full_like(scale_src, new_scale))
+        self.merged = True
+
     @torch.no_grad()
     def unmerge_lora_weights(self) -> None:
         if self.disable_lora:
@@ -601,6 +706,11 @@ class BaseLayerWithLoRA(nn.Module):
             raise ValueError(
                 "LoRA weights not merged. Please merge them first before unmerging."
             )
+
+        if self.cpu_weight_scale is not None and self.can_requant_merge:
+            self._write_fp8_weight(self.cpu_weight, self.cpu_weight_scale)
+            self.merged = False
+            return
 
         # avoid precision loss
         if isinstance(self.base_layer.weight, DTensor):
