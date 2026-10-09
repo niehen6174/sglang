@@ -53,6 +53,25 @@ def _spawn_without_launcher_main():
         main_dict.update(saved)
 
 
+def _reject_h3_vsa(sgld_options: dict) -> None:
+    # The integrated step builds no VSA-H3 tile metadata (its tiles assume the
+    # native packed row order); fail here instead of at the first step after load.
+    components = sgld_options.get("component_attention_backends") or {}
+    if isinstance(components, str):
+        components = dict(
+            item.split("=", 1) for item in components.split(",") if "=" in item
+        )
+    requested = [sgld_options.get("attention_backend"), *components.values()]
+    if any(
+        str(backend or "").strip().lower() == "video_sparse_attn_h3"
+        for backend in requested
+    ):
+        raise ValueError(
+            "attention_backend video_sparse_attn_h3 is not supported in ComfyUI "
+            "integrated mode for MiniMax H3; use fa, sage_attn or torch_sdpa"
+        )
+
+
 def _looks_like_gguf(path: str) -> bool:
     if not path:
         return False
@@ -480,6 +499,8 @@ class SGLDiffusionGenerator:
         if set_model_type is not None and set_model_type in self.pipeline_class_dict:
             model_type = set_model_type
 
+        if model_type in ("minimax_h3", "fast_h3", "vdn_h3"):
+            _reject_h3_vsa(sgld_options)
         if model_type == "minimax_h3" and not runtime_model_path:
             if sgld_options.get("minimax_h3_adaln_online") or sgld_options.get(
                 "minimax_h3_adaln_cache_path"
