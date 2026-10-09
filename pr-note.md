@@ -32,3 +32,6 @@ PYTHONPATH=/scratch/data/sgld_comfy/worktrees/comfyui-multi-lora/python:/scratch
 ```
 
 The original dirty workspace remains separate. No branch was pushed and no PR was created.
+
+## H200 follow-up (2026-10-09)
+Reviewed on 2x H200 with H3 INT8 through ComfyUI `/prompt` (same seed, latent SHA-256): base, A, A+B (INT8 dynamic, previously rejected), cached A after A+B, all removed and strength 0 match their references exactly; B alone differs from A and A+B. Added two fixes for upstream behavior also present here: reject batched MiniMax H3 latents with ComfyUI's "supports batch size 1" (the checkpoint is CFG-distilled; B=2 otherwise failed in the worker with an index_copy_ shape error), and raise the worker error before unpacking instead of a misleading noise_pred TypeError.
