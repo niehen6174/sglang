@@ -153,8 +153,9 @@ def choose_prefix_cache_store(
 class _HostKVRing:
     """Prefix K/V of one sample in pinned host memory, staged to the GPU per layer.
 
-    Reading layer ``i`` prefetches layer ``i + 1`` on a side stream so the copy
-    overlaps that block's compute; only two layers are resident at a time.
+    Reading layer ``i`` prefetches layer ``i + 1`` (layer 0 of the next step
+    after the last one) on a side stream so the copy overlaps that block's
+    compute; only those two layers stay resident.
     """
 
     def __init__(self, num_layers: int):
@@ -195,16 +196,17 @@ class _HostKVRing:
         main.wait_event(event)
         key.record_stream(main)
         value.record_stream(main)
-        for stale in [i for i in self.resident if i < layer]:
+        upcoming = (layer + 1) % len(self.host)
+        for stale in [i for i in self.resident if i not in (layer, upcoming)]:
             del self.resident[stale]
-        self._stage(layer + 1, device)
+        self._stage(upcoming, device)
         return key, value
 
 
 class HostPrefixKV(dict):
     """A per-layer prefix cache slot the DiT reads as ``cache["key"]`` / ``cache["value"]``.
 
-    The dict holds CPU placeholders so ``if cache:`` stays truthy once filled.
+    The dict itself only holds flags so ``if cache:`` turns truthy once filled.
     """
 
     def __init__(self, ring: _HostKVRing, layer: int, device):
