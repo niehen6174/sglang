@@ -15,7 +15,14 @@ from typing import Any
 
 import torch
 
-from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
+from sglang.multimodal_gen.runtime.distributed import (
+    get_local_torch_device,
+    get_sp_parallel_rank,
+    get_sp_world_size,
+)
+from sglang.multimodal_gen.runtime.distributed.communication_op import (
+    sequence_model_parallel_all_gather,
+)
 from sglang.multimodal_gen.runtime.loader.comfyui_checkpoints.ltx_2 import (
     load_comfyui_ltx_connectors,
 )
@@ -77,6 +84,28 @@ def run_ltxav_connectors(
     return torch.cat((video, audio), dim=-1)
 
 
+def shard_video_frames_for_sp(
+    tokens: torch.Tensor, timestep: torch.Tensor, frames: int, rank: int, size: int
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """This SP rank's contiguous latent frames of the [B, T*H*W, C] video tokens.
+
+    The DiT offsets the RoPE time of rank r by r * local frames, so the split
+    must be by whole, equal frame blocks; audio stays replicated on every rank.
+    """
+    if frames % size:
+        raise ValueError(
+            f"LTX sequence parallelism splits the {frames} latent frames across "
+            f"{size} ranks, which needs a frame count divisible by {size}; change "
+            "the video length, or run without sp_degree"
+        )
+    local = frames // size
+    per_rank = tokens.shape[1] // size
+    rows = slice(rank * per_rank, (rank + 1) * per_rank)
+    if timestep.ndim == 2 and timestep.shape[1] == tokens.shape[1]:
+        timestep = timestep[:, rows]
+    return tokens[:, rows], timestep, local
+
+
 class LTX2ComfyUIStepStage(PipelineStage):
     """One ComfyUI ``apply_model`` (or connector) call per request."""
 
@@ -132,8 +161,13 @@ class LTX2ComfyUIStepStage(PipelineStage):
         a_ts = per_token_timestep(extra["ltxav_audio_timestep"], b)
         scale = float(transformer.config.timestep_scale_multiplier)
         video_dim = transformer.config.cross_attention_dim
+        hidden, sp_size = patchify_video(video), get_sp_world_size()
+        if sp_size > 1:
+            hidden, v_ts, frames = shard_video_frames_for_sp(
+                hidden, v_ts, frames, get_sp_parallel_rank(), sp_size
+            )
         video_tokens, audio_tokens = transformer(
-            hidden_states=patchify_video(video),
+            hidden_states=hidden,
             audio_hidden_states=patchify_audio(audio),
             encoder_hidden_states=context[..., :video_dim],
             audio_encoder_hidden_states=context[..., video_dim:],
@@ -145,7 +179,12 @@ class LTX2ComfyUIStepStage(PipelineStage):
             fps=float(extra.get("ltxav_frame_rate", 25.0)),
             audio_num_frames=int(audio.shape[2]),
             return_latents=False,
+            audio_replicated_for_sp=sp_size > 1,
         )
+        if sp_size > 1:
+            video_tokens = sequence_model_parallel_all_gather(
+                video_tokens.contiguous(), dim=1
+            )
         video_out = video_tokens.transpose(1, 2).reshape(video.shape)
         return [video_out, unpatchify_audio(audio_tokens)]
 
@@ -157,5 +196,6 @@ __all__ = [
     "patchify_video",
     "per_token_timestep",
     "run_ltxav_connectors",
+    "shard_video_frames_for_sp",
     "unpatchify_audio",
 ]

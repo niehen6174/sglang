@@ -23,6 +23,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.l
     patchify_audio,
     patchify_video,
     run_ltxav_connectors,
+    shard_video_frames_for_sp,
     unpatchify_audio,
 )
 
@@ -193,3 +194,22 @@ def test_quantization_ignored_layers_match_ltx2_module_paths(
         assert methods[name] == "UnquantizedLinearMethod", name
     for name in ("transformer_blocks.0.attn2.to_q", "patchify_proj"):
         assert methods[name] == "Fp8LinearMethod", name
+
+
+def test_sp_ranks_take_equal_whole_frame_blocks_of_the_video():
+    """Ranks must get contiguous frames: the DiT offsets RoPE time by rank."""
+    frames, height, width = 4, 2, 3
+    tokens = patchify_video(torch.randn(1, 5, frames, height, width))
+    timestep = torch.arange(frames * height * width, dtype=torch.float32)[None]
+    shards = [
+        shard_video_frames_for_sp(tokens, timestep, frames, rank, 2) for rank in (0, 1)
+    ]
+    torch.testing.assert_close(torch.cat([s[0] for s in shards], 1), tokens)
+    torch.testing.assert_close(torch.cat([s[1] for s in shards], 1), timestep)
+    assert [s[2] for s in shards] == [2, 2]
+    # Per-sample timesteps ([B] or [B, 1]) are not per token and stay whole.
+    for per_sample in (torch.full((1,), 0.5), torch.full((2, 1), 0.5)):
+        sharded = shard_video_frames_for_sp(tokens, per_sample, frames, 1, 2)[1]
+        assert sharded is per_sample
+    with pytest.raises(ValueError, match="3 latent frames"):
+        shard_video_frames_for_sp(tokens[:, :18], timestep[:, :18], 3, 0, 2)
