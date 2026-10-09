@@ -192,6 +192,18 @@ class TestMaybeOverrideAttentionBackend(unittest.TestCase):
         self.assertEqual(self.apply_calls, [])
         self.assertIs(self.stage.attn_backend, self.default_backend_cls)
 
+    def test_skip_softmax_rejection_names_skip_softmax_not_override(self):
+        """A model without shared layers on a non-FA server rejected skip_softmax
+        as attention_backend_override='fa', a field the request never set."""
+        self.layers.clear()
+        self.stage.attn_backend = _fake_backend_cls(AttentionBackendEnum.TORCH_SDPA)
+        with self.assertRaises(ValueError) as ctx:
+            self.stage._maybe_override_attention_backend(
+                _batch(None), force_fa_for_self_attention=True
+            )
+        self.assertIn("skip_softmax_params", str(ctx.exception))
+        self.assertNotIn("attention_backend_override", str(ctx.exception))
+
     def test_unknown_backend_name_rejected(self):
         with self.assertRaisesRegex(ValueError, "Unknown attention_backend_override"):
             self.stage._maybe_override_attention_backend(_batch("bogus_attn"))
