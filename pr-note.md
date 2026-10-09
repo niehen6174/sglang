@@ -1,19 +1,53 @@
-# Support ComfyUI multi-image batches and opt-in native batching
+# Add Wan 2.1 1.3B and Wan 2.2 5B to ComfyUI integrated mode
 
-Base: `codex/fix-comfyui-multi-lora` (`a443903da6`). The first additional commit imports OnePunchMonk's complete #43109 conditioning-cache fix, credited to its author.
+SGLang already implements Wan, but SGLDUNETLoader rejected ComfyUI Wan
+checkpoints. This change supports Wan 2.1 T2V 1.3B and Wan 2.2 TI2V 5B
+(text-to-video and image-conditioned sampling). ComfyUI retains UMT5, video
+latent preparation, frame masking, sampling and VAE decoding; the existing
+WanPipeline runs the DiT forward only.
 
-ComfyUI sends a batch for multiple images and for concatenated CFG conditions. The existing path calls `.item()` on a timestep vector, records sequence lengths for only one sample, and passes the vector as a multi-step schedule. A two-image Flux workflow fails.
+The checkpoint spec derives architecture from safetensors headers, handles
+original Wan names with or without the model.diffusion_model prefix, and
+loads strictly. It retains native Diffusers mappings so original-format and
+Diffusers-format LoRAs both resolve to runtime layers. The adapter preserves
+5D latents, circular spatial padding, video geometry and Wan 2.2 per-frame
+masked timesteps. These timesteps are repeated per patch token and never
+stored in the condition cache. Default worker precision follows ComfyUI;
+explicit component_precisions overrides remain supported.
 
-The default now sends one B=1 request per row, following #43163's fallback approach. `SGLDOptions.enable_native_batch=True` enables an actual batched request for Flux and Qwen-Image when timestep and Flux guidance are uniform. Preserve the full latent/conditioning batch, describe per-sample sequence lengths, size generators to the effective batch, and send one schedule timestep. Other input cases retain per-row execution. H3 nested inputs are unchanged.
+FP32 validation also exposed FlashInfer RoPE's half-precision-only dispatch.
+The existing torch fallback now handles FP32; FP16/BF16 keep their fast path.
 
-Expose the existing `allow_bf16_reduced_precision_reduction` runtime option in SGLDOptions. It can reduce shape-dependent numerical drift but does not guarantee single-image/batched equivalence. The default keeps the upstream numerical policy.
+## Validation
 
-A separate loader fix reads guidance presence from the Flux checkpoint header: Schnell has no guidance embedder and previously failed before its first forward.
+- RTX 5090 32 GB, one GPU, torch_sdpa, no torch.compile.
+- 515 focused unit tests plus 5 existing native Wan configuration/TI2V tests passed.
+- 35 selected final ComfyUI API requests succeeded with finite latent outputs.
+- Both models: CFG, B=2 (row fallback), different frame counts, original ComfyUI comparisons.
+- Wan 2.2: image-conditioned frame masks, automatic model detection.
+- Both models: synthetic rank-2/rank-3 LoRAs A/B/AB change output; AB→A, zero strength and removing all LoRAs restore the corresponding reference exactly.
+- Three complete standard API graphs: 20 UniPC steps, simple scheduler, CFG 5, shift 8, 512×320, 33 frames, VAE decode and animated WebP output. ModelSamplingSD3 is included.
 
-Validation: 492 unit tests passed. 25 API requests against the final source passed using full Flux Schnell BF16, real text encoders, fixed per-row noise, 256x256, Euler 2 steps, single RTX 5090 and torch_sdpa. The default matches row references exactly. Native ordinary B=2 and CFG B=4 use one RPC per step. Changing another row and permuting rows preserve the expected outputs exactly. Multi-LoRA replacement/removal on B=2 matches same-batch references exactly.
+FP32 two-step relative latent RMSE against native ComfyUI is 0.0074% (1.3B)
+and 0.0043% (5B with an input image). FP16 two-step differences are
+0.13–1.54%; full 20-step T2V sampling differs by 8.58% / 15.84% in latent
+RMSE. This is functional support, not a claim of bitwise or pixel-identical
+native output. No image-quality score or general performance claim is made.
+The small Euler smoke tests are retained as diagnostic evidence; published
+API examples use the tested UniPC graphs.
 
-Native BF16 batch output is not equivalent to independent B=1 output: this small test measured 10–15% relative latent RMSE, with similar drift in original ComfyUI. Layer diagnostics implicate shape-dependent matrix arithmetic; disabling low-precision reduction helps but does not eliminate the general issue. Default per-row execution preserves reference behavior. This does not establish image quality, all model variants, compilation configurations or multi-GPU correctness. Qwen-Image coverage is unit/interface validation only; no full Qwen GPU checkpoint was run.
+Evidence: /scratch/data/sgld_comfy/results/comfyui-wan-20261009/
+(FINAL_VALIDATION.json, comparisons-*.json, lora-validation.json, workflows,
+runs, logs, media and reproducible local tools). Failed exploratory loading,
+FP32 and ineffective-LoRA runs remain preserved separately.
 
-Saved evidence, scripts, workflows and conclusions: `/scratch/data/sgld_comfy/results/comfyui-batch-20261009`. Early failed equivalence checks are preserved separately from the passing functional checks; no tolerance was relaxed.
+## Scope and dependency
 
-Full native batch requires no additional #43163 patch on this branch: its per-row behavior is already incorporated. The branch includes the earlier multi-LoRA commits; review only commits after `a443903da6` for this change.
+Branch: codex/feat-comfyui-wan. Base: codex/fix-comfyui-native-batch at
+713df826c243ed47be57244b08b936640068cd86. This includes the earlier multi-LoRA
+and batch fixes; this note describes only the new Wan changes.
+
+Wan native packed batching, multi-GPU, compile, sparse attention and
+quantization were not validated. Wan 2.1 I2V, VACE, Animate, camera/control,
+and Wan 2.2 14B high/low-noise workflows are outside this change's scope.
+Models, media and machine-local result files are not part of the commit.

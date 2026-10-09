@@ -8,6 +8,7 @@ import os
 
 from ..executors.flux import FluxExecutor
 from ..executors.minimax_h3 import MiniMaxH3Executor
+from ..executors.wan import WanExecutor
 from ..executors.zimage import ZImageExecutor
 
 logger = logging.getLogger(__name__)
@@ -109,7 +110,7 @@ except ImportError:
 
 def _load_executor_classes():
     """Qwen adapters import ComfyUI. Keep them optional so CI can load the rest."""
-    classes = [FluxExecutor, ZImageExecutor, MiniMaxH3Executor]
+    classes = [FluxExecutor, ZImageExecutor, MiniMaxH3Executor, WanExecutor]
     try:
         from ..executors.qwen_image import QwenImageEditExecutor, QwenImageExecutor
     except ModuleNotFoundError as exc:
@@ -428,8 +429,20 @@ class SGLDiffusionGenerator:
             model_type = set_model_type
 
         pipeline_class_name = self.pipeline_class_dict[model_type]
+        runtime_options = dict(sgld_options)
+        if model_type == "wan2.1":
+            dtype = str(model_config.unet_config["dtype"])
+            precision = {
+                "torch.float16": "fp16",
+                "torch.bfloat16": "bf16",
+                "torch.float32": "fp32",
+            }[dtype]
+            precisions = dict(runtime_options.get("component_precisions") or {})
+            precisions.setdefault("dit", precisions.get("transformer", precision))
+            precisions.setdefault("transformer", precisions["dit"])
+            runtime_options["component_precisions"] = precisions
         self.generator = self.init_generator(
-            detect_path, pipeline_class_name, sgld_options
+            detect_path, pipeline_class_name, runtime_options
         )
 
         executor_class = self.executor_class_dict[model_type]

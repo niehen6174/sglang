@@ -8,6 +8,8 @@ This module contains an implementation of the Wan video diffusion pipeline
 using the modular pipeline architecture.
 """
 
+from sglang.multimodal_gen.configs.pipeline_configs.wan import WanT2V480PConfig
+from sglang.multimodal_gen.configs.sample.wan import WanT2V_1_3B_SamplingParams
 from sglang.multimodal_gen.runtime.models.schedulers.scheduling_flow_unipc_multistep import (
     FlowUniPCMultistepScheduler,
 )
@@ -30,6 +32,8 @@ class WanPipeline(LoRAPipeline, ComposedPipelineBase):
     """
 
     pipeline_name = "WanPipeline"
+    pipeline_config_cls = WanT2V480PConfig
+    sampling_params_cls = WanT2V_1_3B_SamplingParams
 
     _required_config_modules = [
         "text_encoder",

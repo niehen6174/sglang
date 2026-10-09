@@ -135,6 +135,8 @@ def apply_flashinfer_rope_qk_inplace(
         and k.is_cuda
         and cos_sin_cache.is_cuda
         and q_heads == k_heads
+        and q.dtype == k.dtype
+        and q.dtype in (torch.float16, torch.bfloat16)
     )
 
     if not use_flashinfer:

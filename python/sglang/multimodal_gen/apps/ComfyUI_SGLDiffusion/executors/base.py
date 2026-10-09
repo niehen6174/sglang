@@ -171,7 +171,7 @@ class SGLDiffusionExecutor(torch.nn.Module):
             "guidance_scale": packed.guidance_scale,
             "height": packed.height,
             "width": packed.width,
-            "num_frames": 1,
+            "num_frames": packed.num_frames,
             "num_inference_steps": 1,
             "save_output": False,
             "suppress_logs": self.should_suppress_logs(timestep),

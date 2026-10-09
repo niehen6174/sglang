@@ -91,6 +91,7 @@ def _discover_checkpoint_specs() -> None:
         flux,
         minimax_h3,
         qwen_image,
+        wan,
         zimage,
     )
 

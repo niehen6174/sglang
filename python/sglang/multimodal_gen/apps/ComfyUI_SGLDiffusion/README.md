@@ -5,7 +5,7 @@ server. Integrated mode keeps ComfyUI's CLIP / VAE / sampler loop and uses
 SGLang only as a per-step DiT forward.
 
 Integrated mode no longer ships dedicated `comfyui_*` pipelines. It starts the
-native Flux / Qwen-Image / Z-Image / MiniMax-H3 pipeline under `--comfyui-mode`,
+native Flux / Qwen-Image / Z-Image / MiniMax-H3 / Wan pipeline under `--comfyui-mode`,
 loads a single-file ComfyUI `.safetensors` (or GGUF overlay) through a
 checkpoint spec, and translates each `apply_model` call through a small
 per-model adapter.
@@ -25,6 +25,18 @@ The plugin supports two modes of operation: **Server Mode** (via HTTP API) and *
 - **FLUX**: State-of-the-art text-to-image models (e.g., `FLUX.1-dev`)
 - **Qwen-Image**: Multi-modal image generation models (e.g., `Qwen-Image`,`Qwen-Image-2512`). *Note: Image editing support is currently experimental and may have some issues.*
 - **MiniMax-H3**: Joint video-and-audio DiT (`model_type=minimax_h3`). Integrated mode: T2V / I2VA / FL2VA use an `fl2va` checkpoint; R2V needs `ref2va`. CLIP and VAE stay in ComfyUI. Server mode uses `SGLDiffusion Generate MiniMax-H3`.
+
+Wan integrated mode supports **Wan 2.1 T2V 1.3B** and **Wan 2.2 TI2V 5B**
+(T2V and image-conditioned sampling). Use `model_type=auto-detect` or `wan2.1`
+for both versions. Checkpoints use the original Wan tensor names, optionally
+prefixed with `model.diffusion_model.`. ComfyUI owns UMT5 encoding, video latents,
+frame masks, sampling and VAE decoding. The worker uses ComfyUI's selected DiT
+precision unless `component_precisions` explicitly overrides it.
+
+Wan batches, including CFG batches, currently run one row per worker request.
+`enable_native_batch` does not enable packed Wan batching. Wan 2.1 I2V, VACE,
+Animate, camera/control and serialized quantized checkpoints are outside this
+integration's current scope.
 
 ### Mode 1: Server Mode (HTTP API)
 Connect to a standalone SGLang Diffusion server.
@@ -69,12 +81,11 @@ Take **Integrated Mode** only when the model denoises a single latent tensor
 that ComfyUI already knows how to build and decode, so its KSampler can drive
 the loop unchanged. Each model then needs:
 
-- `runtime/pipelines/comfyui_<model>_pipeline.py` mapping ComfyUI's
-  single-file checkpoint layout onto the native module tree (350-690 lines in
-  the existing three)
-- an executor in `executors/` adapting latent layout and conditioning to `Req`
-- entries in both `pipeline_class_dict` and `executor_class_dict` in
-  `core/generator.py`
+- a checkpoint spec in `runtime/loader/comfyui_checkpoints/`, supplying
+  architecture detection and the weight-name mapping for single-file checkpoints
+- an adapter and executor in `executors/` translating the DiT forward to `Req`
+- executor registration in `core/generator.py`, and native pipeline
+  `pipeline_config_cls` / `sampling_params_cls` attributes for single-file loading
 
 ## Example Workflows
 
@@ -83,11 +94,23 @@ Reference workflow files are provided in the `workflows/` directory:
 - **`flux_sgld_sp.json`**: Multi-GPU (Sequence Parallelism) workflow for FLUX models. High-performance inference across multiple cards.
 - **`qwen_image_sgld.json`**: Qwen-Image generation with LoRA support. Optimized for multi-modal image tasks.
 - **`z-image_sgld.json`**: High-speed image generation using Z-Image.
+- **`wan21_t2v_sgld_api.json`**: Wan 2.1 1.3B text-to-video.
+- **`wan22_t2v_sgld_api.json`**: Wan 2.2 5B text-to-video.
+- **`wan22_i2v_sgld_api.json`**: Wan 2.2 5B image-to-video; replace the `EmptyImage` input with your image.
+
 - **`sgld_text2img.json`**: Server-mode text-to-image generation with LoRA support.
 - **`sgld_image2video.json`**: Server-mode image-to-video generation.
 - **`minimax_h3_t2v_sgld.json`**: MiniMax-H3 T2V / I2VA / FL2VA (`fl2va` DiT).
 - **`minimax_h3_r2v_sgld.json`**: MiniMax-H3 reference-to-video (`ref2va` DiT).
 - **`minimax_h3_t2v_sgld_upscaler.json`**: H3 two-pass latent upscale (low-res then 3D ×2 refine).
+
+The three Wan examples are **API-format graphs**, submitted as the `prompt`
+field of `POST /prompt`. They use 20 UniPC steps, the simple scheduler, CFG 5,
+flow shift 8,
+512×320, 33 video frames and animated WebP output as a reduced-resolution
+functional example, not a production quality preset. Install the matching DiT
+in `diffusion_models`, UMT5 in `text_encoders`,
+and Wan 2.1 / 2.2 VAE in `vae`.
 
 For other workflows supporting the models, you can easily use SGLang by replacing the official `UNET Loader` node with the `SGLDUNETLoader` node. Similarly, for LoRA support, replace the official LoRA loader with the `SGLDiffusion LoRA Loader`.
 

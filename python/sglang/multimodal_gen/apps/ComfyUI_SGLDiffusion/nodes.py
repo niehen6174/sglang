@@ -41,6 +41,7 @@ class SGLDOptions:
                         "qwen_image_edit",
                         "flux",
                         "lumina2",
+                        "wan2.1",
                         "minimax_h3",
                     ],
                     {"default": "auto-detect"},

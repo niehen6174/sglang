@@ -2004,6 +2004,10 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
         seq_len: int | None,
         reserved_frames_mask,
     ):
+        if server_args.comfyui_mode:
+            model_timestep = (batch.extra or {}).get("comfyui_model_timestep")
+            if model_timestep is not None:
+                return model_timestep.to(device=t_device.device)
         bsz = batch.raw_latent_shape[0]
         should_preprocess_for_wan_ti2v = should_apply_wan_ti2v(batch, server_args)
 
