@@ -25,6 +25,7 @@ from sglang.multimodal_gen.runtime.loader.comfyui_checkpoints import (
 )
 from sglang.multimodal_gen.runtime.loader.comfyui_checkpoints.qwen_image21 import (
     arch_from_checkpoint_shapes,
+    split_gate_up_markers,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.comfyui_mode import (
     get_run_state,
@@ -101,6 +102,51 @@ def test_checkpoint_spec_splits_fused_gate_up() -> None:
                 config,
             )
         )
+
+
+def test_int8_convrot_gate_up_splits_scale_and_marker() -> None:
+    """INT8 ConvRot files carry a per-row weight_scale and a comfy_quant marker per layer."""
+    spec = get_comfyui_checkpoint_spec("QwenImage21Pipeline")
+    assert spec.quant_markers is not None
+    config = QwenImage21DitConfig(
+        arch_config=QwenImage21ArchConfig(num_attention_heads=1, attention_head_dim=4)
+    )
+    ffn = 4 * 3
+    scale = torch.arange(2 * ffn, dtype=torch.float32)[:, None]
+    out = dict(
+        spec.convert_weights(
+            iter(
+                [
+                    ("transformer_blocks.0.img_mlp.gate_up.weight_scale", scale),
+                    (
+                        "transformer_blocks.0.img_mlp.gate_up.comfy_quant",
+                        torch.zeros(3),
+                    ),
+                ]
+            ),
+            config,
+        )
+    )
+    assert torch.equal(
+        out["transformer_blocks.0.img_mlp.gate_layer.weight_scale"], scale[:ffn]
+    )
+    assert torch.equal(
+        out["transformer_blocks.0.img_mlp.proj.weight_scale"], scale[ffn:]
+    )
+    assert not any(k.endswith("comfy_quant") for k in out)
+
+    marker = {"format": "int8_tensorwise", "convrot": True, "convrot_groupsize": 256}
+    markers = split_gate_up_markers(
+        {
+            "transformer_blocks.0.img_mlp.gate_up": marker,
+            "transformer_blocks.0.attn.to_q": marker,
+        }
+    )
+    assert set(markers) == {
+        "transformer_blocks.0.img_mlp.gate_layer",
+        "transformer_blocks.0.img_mlp.proj",
+        "transformer_blocks.0.attn.to_q",
+    }
 
 
 # ----- layout ---------------------------------------------------------------

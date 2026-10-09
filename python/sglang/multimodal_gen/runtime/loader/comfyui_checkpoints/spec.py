@@ -70,6 +70,9 @@ class ComfyUICheckpointSpec:
     # mapping is applied repeatedly until it reaches a fixed point and the
     # config rules would rewrite names this spec already resolved.
     inherit_config_mapping: bool = True
+    # Serialized ComfyUI quantization (INT8 ConvRot): returns the per-layer
+    # ``comfy_quant`` markers keyed by SGLang module prefix; {} for a bf16 file.
+    quant_markers: Callable[[list[str]], dict[str, dict[str, Any]]] | None = None
 
 
 _SPEC_REGISTRY: dict[str, ComfyUICheckpointSpec] = {}
@@ -254,48 +257,50 @@ def load_comfyui_transformer(
         # GGUF already sets AdaLN curve from tensor meta. Pruned BF16
         # safetensors keep the same adaln_t_table; without this the DiT is
         # built as the unpruned MLP and load fails on that extra parameter.
+        adaln_curve_shape = None
+        layer_markers = {}
         if spec.dit_cls_name == "MiniMaxH3DiTModel":
             adaln_curve_shape, layer_markers = inspect_minimax_h3_safetensors(
                 [model_path]
             )
-            if layer_markers:
-                if any(
-                    marker.get("format") != "int8_tensorwise"
-                    for marker in layer_markers.values()
-                ):
-                    raise ValueError(
-                        "ComfyUI H3 integrated mode currently supports serialized INT8 ConvRot quantization"
-                    )
-                if (
-                    server_args.quantization is not None
-                    or server_args.nunchaku_config is not None
-                ):
-                    raise ValueError(
-                        "Checkpoint quantization is encoded in per-layer metadata; do not also set quantization or Nunchaku"
-                    )
-                if server_args.should_use_fsdp_for_component("transformer"):
-                    raise ValueError(
-                        "Comfy quantized checkpoints do not support FSDP inference; use TP and/or sequence parallelism instead"
-                    )
-                quant_config = resolve_minimax_h3_checkpoint_quantization(layer_markers)
-                checkpoint_key_filter = comfy_quant_key_filter
-                checkpoint_device = (
-                    torch.device("cpu")
-                    if server_args.should_start_component_on_cpu("transformer")
-                    else get_local_torch_device()
+        elif spec.quant_markers is not None:
+            layer_markers = spec.quant_markers([model_path])
+        if layer_markers:
+            if any(
+                marker.get("format") != "int8_tensorwise"
+                for marker in layer_markers.values()
+            ):
+                raise ValueError(
+                    "ComfyUI integrated mode currently supports serialized INT8 ConvRot quantization"
                 )
-                weight_load_plan = WeightLoadPlan(
-                    checkpoint_load_device=checkpoint_device
+            if (
+                server_args.quantization is not None
+                or server_args.nunchaku_config is not None
+            ):
+                raise ValueError(
+                    "Checkpoint quantization is encoded in per-layer metadata; do not also set quantization or Nunchaku"
                 )
-            if adaln_curve_shape is not None:
-                (
-                    dit_config.arch_config.adaln_curve_grid,
-                    dit_config.arch_config.time_embed_dim,
-                ) = adaln_curve_shape
-                logger.info(
-                    "MiniMax-H3 ComfyUI checkpoint uses AdaLN curve %s",
-                    adaln_curve_shape,
+            if server_args.should_use_fsdp_for_component("transformer"):
+                raise ValueError(
+                    "Comfy quantized checkpoints do not support FSDP inference; use TP and/or sequence parallelism instead"
                 )
+            quant_config = resolve_minimax_h3_checkpoint_quantization(layer_markers)
+            checkpoint_key_filter = comfy_quant_key_filter
+            checkpoint_device = (
+                torch.device("cpu")
+                if server_args.should_start_component_on_cpu("transformer")
+                else get_local_torch_device()
+            )
+            weight_load_plan = WeightLoadPlan(checkpoint_load_device=checkpoint_device)
+        if adaln_curve_shape is not None:
+            (
+                dit_config.arch_config.adaln_curve_grid,
+                dit_config.arch_config.time_embed_dim,
+            ) = adaln_curve_shape
+            logger.info(
+                "MiniMax-H3 ComfyUI checkpoint uses AdaLN curve %s",
+                adaln_curve_shape,
+            )
 
         logger.info(
             "Loading %s from ComfyUI checkpoint %s, param_dtype: %s",

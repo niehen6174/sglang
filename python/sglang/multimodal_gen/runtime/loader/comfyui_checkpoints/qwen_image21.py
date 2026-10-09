@@ -25,7 +25,9 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 _PREFIX_RE = re.compile(r"^(?:model\.diffusion_model\.|diffusion_model\.)")
-_GATE_UP_RE = re.compile(r"^(.*\.img_mlp)\.gate_up\.weight$")
+# Fused SwiGLU input projection; INT8 ConvRot files add a per-row weight_scale.
+_GATE_UP_RE = re.compile(r"^(.*\.img_mlp)\.gate_up\.(weight|weight_scale)$")
+_GATE_UP_PREFIX = ".img_mlp.gate_up"
 _BLOCK_RE = re.compile(r"^transformer_blocks\.(\d+)\.")
 
 
@@ -94,6 +96,9 @@ def _convert_weights(weights: WeightIterator, dit_config: Any) -> WeightIterator
     ffn_dim = arch.hidden_size * arch.mlp_ratio
     for name, tensor in weights:
         name = strip_comfyui_prefix(name)
+        if name.endswith(".comfy_quant"):
+            # Read through quant_markers; the custom iterator bypasses the key filter.
+            continue
         match = _GATE_UP_RE.match(name)
         if match is None:
             yield name, tensor
@@ -102,9 +107,36 @@ def _convert_weights(weights: WeightIterator, dit_config: Any) -> WeightIterator
             raise ValueError(
                 f"{name} must have {2 * ffn_dim} rows, got {tuple(tensor.shape)}"
             )
-        mlp = match.group(1)
-        yield f"{mlp}.gate_layer.weight", tensor[:ffn_dim]
-        yield f"{mlp}.proj.weight", tensor[ffn_dim:]
+        mlp, param = match.groups()
+        # Row split is exact for INT8 too: ConvRot rotates the input (column) axis
+        # and the scale is per output row.
+        yield f"{mlp}.gate_layer.{param}", tensor[:ffn_dim]
+        yield f"{mlp}.proj.{param}", tensor[ffn_dim:]
+
+
+def _quant_markers(safetensors_list: list[str]) -> dict[str, dict[str, Any]]:
+    from sglang.multimodal_gen.runtime.utils.quantization_utils import (
+        inspect_comfy_quant_markers,
+    )
+
+    markers = inspect_comfy_quant_markers(
+        safetensors_list, param_name_mapper=strip_comfyui_prefix
+    )
+    return split_gate_up_markers(markers)
+
+
+def split_gate_up_markers(
+    markers: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    out = {}
+    for prefix, marker in markers.items():
+        if prefix.endswith(_GATE_UP_PREFIX):
+            mlp = prefix[: -len(".gate_up")]
+            out[f"{mlp}.gate_layer"] = dict(marker)
+            out[f"{mlp}.proj"] = dict(marker)
+        else:
+            out[prefix] = marker
+    return out
 
 
 register_comfyui_checkpoint(
@@ -113,5 +145,6 @@ register_comfyui_checkpoint(
         dit_cls_name="QwenImage21Transformer2DModel",
         build_dit_config=_build_dit_config,
         convert_weights=_convert_weights,
+        quant_markers=_quant_markers,
     ),
 )
