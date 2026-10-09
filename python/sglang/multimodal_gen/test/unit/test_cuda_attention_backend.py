@@ -259,9 +259,11 @@ class TestCudaAttentionBackendSelection(unittest.TestCase):
                     component=component, override=override, size=head_size
                 ):
                     with (
-                        self.assertRaisesRegex(ValueError, "head size 256")
-                        if expected is None
-                        else nullcontext(),
+                        (
+                            self.assertRaisesRegex(ValueError, "head size 256")
+                            if expected is None
+                            else nullcontext()
+                        ),
                         component_attn_backend_context_manager(
                             override,
                             component_name=component,
@@ -271,7 +273,7 @@ class TestCudaAttentionBackendSelection(unittest.TestCase):
                         backend = get_attn_backend(head_size, torch.float16)
                         self.assertEqual(backend.get_enum(), expected)
 
-    def test_hopper_sage_attention_without_sm90_fix_falls_back(self):
+    def test_hopper_sage_attention_without_sm90_fix_is_rejected(self):
         FakeCudaPlatform.is_hopper_device = True
         sageattention = types.ModuleType("sageattention")
         sageattention.__path__ = []
@@ -285,10 +287,50 @@ class TestCudaAttentionBackendSelection(unittest.TestCase):
                 "sageattention.sm90_compile": sm90_compile,
             },
         ):
-            self.assertEqual(
-                _SageAttentionBackendResolver.resolve(FakeCudaPlatform),
-                AttentionBackendEnum.FA,
-            )
+            with self.assertRaisesRegex(ValueError, "--force-reinstall"):
+                _SageAttentionBackendResolver.resolve(FakeCudaPlatform)
+
+    def test_missing_sage_backends_are_rejected_not_silently_replaced(self):
+        """sage_attn / sage_attn_3 used to run FA / SDPA when not installed, so an
+        explicit request reported another kernel's speed and numerics."""
+        sage3_backend = (
+            "sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn3"
+        )
+        with patch.dict(sys.modules, {"sageattention": None, sage3_backend: None}):
+            with self.assertRaisesRegex(ValueError, "pip install git\\+https"):
+                self.resolve(AttentionBackendEnum.SAGE_ATTN)
+            with self.assertRaisesRegex(ValueError, "SageAttention 3 is not installed"):
+                self.resolve(AttentionBackendEnum.SAGE_ATTN_3)
+
+    def test_missing_sage_keeps_auxiliary_component_fallback(self):
+        selector = "sglang.multimodal_gen.runtime.layers.attention.selector"
+        server_args = ServerArgs.__new__(ServerArgs)
+        server_args.attention_backend = "sage_attn"
+        server_args._explicit_arg_names = {"attention_backend"}
+        sdpa = AttentionBackendEnum.TORCH_SDPA
+        with (
+            patch.dict(sys.modules, {"sageattention": None}),
+            patch(f"{selector}.get_global_server_args", return_value=server_args),
+            patch(f"{selector}.get_global_forced_attn_backend", return_value=None),
+            patch(
+                "sglang.multimodal_gen.runtime.platforms.current_platform",
+                FakeCudaPlatform,
+            ),
+            patch.object(
+                FakeCudaPlatform, "_resolve_default_attn_backend", return_value=sdpa
+            ),
+        ):
+            with component_attn_backend_context_manager(
+                None, component_name="text_encoder", allow_global_backend_fallback=True
+            ):
+                self.assertEqual(get_attn_backend(64, torch.float16).get_enum(), sdpa)
+            with (
+                self.assertRaisesRegex(ValueError, "SageAttention is not installed"),
+                component_attn_backend_context_manager(
+                    None, component_name="transformer"
+                ),
+            ):
+                get_attn_backend(64, torch.float16)
 
     def test_sparge_attention_resolver(self):
         module = types.ModuleType("spas_sage_attn")
