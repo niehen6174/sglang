@@ -508,6 +508,10 @@ class SGLDiffusionGenerator:
 
         if model_type in ("minimax_h3", "fast_h3", "vdn_h3"):
             _reject_h3_vsa(sgld_options)
+        if model_type == "fast_h3":
+            from ..executors.minimax_h3 import load_fasth3_release
+
+            load_fasth3_release(runtime_model_path)
         if model_type == "minimax_h3" and not runtime_model_path:
             if detect_path.endswith(".safetensors") and _has_vsa_gate(detect_path):
                 raise ValueError(
