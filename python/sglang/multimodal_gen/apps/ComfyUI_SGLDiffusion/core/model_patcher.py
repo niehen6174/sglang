@@ -29,6 +29,27 @@ class SGLDModelPatcher(ModelPatcher):
             "lumina2": 8 * 1024 * 1024 * 1024,
         }
 
+    def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
+        """Reject weight patches (native LoRA) aimed at the SGLD-served DiT.
+
+        The DiT weights live in the SGLD worker, so ComfyUI cannot patch them;
+        silently ignoring the patch would drop the LoRA. Patches for other
+        models (e.g. a LoraLoader's text-encoder keys) are not ours to apply.
+        """
+        dit_keys = [
+            key
+            for key in patches
+            if (key if isinstance(key, str) else key[0]).startswith("diffusion_model.")
+        ]
+        if dit_keys and strength_patch != 0:
+            raise RuntimeError(
+                f"{len(dit_keys)} LoRA / weight patches (e.g. {dit_keys[0]!r}) target "
+                "the diffusion model served by SGLang, which ComfyUI cannot patch. "
+                "Load this LoRA with 'SGLDiffusion LoRA Loader' (SGLDLoraLoader) "
+                "instead of LoraLoader / LoraLoaderModelOnly."
+            )
+        return []
+
     def clone(self):
         """Clone the model patcher."""
         n = SGLDModelPatcher(

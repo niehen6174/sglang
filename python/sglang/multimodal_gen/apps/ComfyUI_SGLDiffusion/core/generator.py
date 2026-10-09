@@ -6,6 +6,7 @@ import atexit
 import logging
 import os
 
+from ..executors.base import evict_comfy_models
 from ..executors.flux import FluxExecutor
 from ..executors.minimax_h3 import MiniMaxH3Executor
 from ..executors.zimage import ZImageExecutor
@@ -377,6 +378,7 @@ class SGLDiffusionGenerator:
         model_config.custom_operations = model_options.get("custom_operations", None)
         model_config.unet_config["disable_unet_model_creation"] = True
         comfyui_model = model_config.get_model({})
+        comfyui_model.sgld_dit_state_keys = tuple(new_sd.keys())
         return comfyui_model, model_config, model_type
 
     def load_model(
@@ -428,6 +430,8 @@ class SGLDiffusionGenerator:
             model_type = set_model_type
 
         pipeline_class_name = self.pipeline_class_dict[model_type]
+        # The worker allocates outside ComfyUI's accounting; models reload on demand.
+        evict_comfy_models()
         self.generator = self.init_generator(
             detect_path, pipeline_class_name, sgld_options
         )
