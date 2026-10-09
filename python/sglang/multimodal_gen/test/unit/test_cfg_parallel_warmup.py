@@ -84,6 +84,7 @@ def _make_bare_scheduler(enable_cfg_parallel: bool) -> Scheduler:
     scheduler = object.__new__(Scheduler)
 
     server_args = MagicMock()
+    server_args.comfyui_mode = False
     server_args.warmup_mode = "request"
     server_args.warmup_steps = 1
     server_args.warmup_resolutions = ["512x512"]
@@ -325,6 +326,7 @@ class TestWarmupReqCfgParallel(unittest.TestCase):
     def test_diff_generator_runs_explicit_warmup_through_scheduler_client(self):
         generator = object.__new__(DiffGenerator)
         server_args = MagicMock()
+        server_args.comfyui_mode = False
         server_args.warmup_mode = "request"
         server_args.warmup_resolutions = ["832x480"]
         server_args.warmup_steps = 1
@@ -976,6 +978,7 @@ class TestWarmupReqCfgParallel(unittest.TestCase):
 
     def test_mesh_pipeline_builds_image_conditioned_warmup(self):
         server_args = MagicMock()
+        server_args.comfyui_mode = False
         server_args.warmup_mode = "server"
         server_args.warmup_steps = 1
         server_args.warmup_resolutions = None

@@ -87,7 +87,7 @@ def is_realtime_serving(server_args: ServerArgs) -> bool:
 def should_run_synthetic_server_warmup(server_args: ServerArgs) -> bool:
     return (
         should_run_server_warmup(server_args)
-        and not getattr(server_args, "comfyui_mode", False)
+        and not server_args.comfyui_mode
         and supports_synthetic_warmup(server_args)
         and not is_realtime_serving(server_args)
     )
@@ -96,7 +96,7 @@ def should_run_synthetic_server_warmup(server_args: ServerArgs) -> bool:
 def should_run_explicit_client_warmup(server_args: ServerArgs) -> bool:
     return (
         server_args.warmup_mode != "off"
-        and not getattr(server_args, "comfyui_mode", False)
+        and not server_args.comfyui_mode
         and server_args.warmup_resolutions is not None
         and supports_synthetic_warmup(server_args)
     )
@@ -404,7 +404,7 @@ class SchedulerWarmupMixin:
     ) -> list[tuple[bytes, Any]]:
         if (
             self.req_based_warmup_scheduled
-            or getattr(self.server_args, "comfyui_mode", False)
+            or self.server_args.comfyui_mode
             or self.server_args.warmup_mode != "request"
             or not recv_reqs
             or self.server_args.warmup_resolutions is not None

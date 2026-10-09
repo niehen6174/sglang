@@ -251,8 +251,8 @@ def load_comfyui_transformer(
         checkpoint_key_filter = None
         weight_load_plan = None
         if spec.dit_cls_name == "MiniMaxH3DiTModel" and (
-            getattr(server_args, "minimax_h3_adaln_online", False)
-            or getattr(server_args, "minimax_h3_adaln_cache_path", None) is not None
+            server_args.minimax_h3_adaln_online
+            or server_args.minimax_h3_adaln_cache_path is not None
         ):
             raise ValueError(
                 "ComfyUI H3 checkpoint loading does not support native AdaLN "

@@ -755,6 +755,7 @@ class TestAutoResidencySkipReason:
             nunchaku_config=None,
             direct_gpu_weight_loading=False,
             ltx2_two_stage_device_mode=None,
+            comfyui_mode=False,
             pipeline_class_name=None,
             pipeline_config=SimpleNamespace(
                 task_type=ModelTaskType.T2V,
