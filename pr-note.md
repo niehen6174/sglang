@@ -13,3 +13,7 @@ The complete local integration campaign recorded 125 API requests (101 successfu
 
 This branch intentionally excludes allocator/RoPE/copy performance changes, model-patcher lifetime, MXFP8 staging, and returned timing fixes. The performance branch depends on this commit.
 
+
+## H200 follow-up (2026-10-09)
+- ComfyUI SGLD workers no longer re-execute ComfyUI `main.py` under spawn. Before, `import utils` in the child resolved to `ComfyUI/comfy/utils.py` (custom-node init puts `ComfyUI/comfy` first on `sys.path`), so the worker died with an opaque `EOFError` unless ComfyUI's alembic migration happened to prepend `.`; a second ComfyUI instance on a locked DB could never start the integrated worker. Same-seed T2AV latents bit-identical before/after; two concurrent single-GPU instances then reached 1.97x single-instance throughput on 2x H200.
+- The H3 DiT attention-backend precedence change in this branch (component override before the global forced backend) is intentional; the contract test now pins it, including the global backend applying when no component override is set.
