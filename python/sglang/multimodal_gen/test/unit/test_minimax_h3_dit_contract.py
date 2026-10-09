@@ -290,22 +290,31 @@ def test_cache_dit_input_preservation_toggles_every_block():
     assert not any(block.preserve_input_for_cache_dit for block in model.blocks)
 
 
+# The transformer's own backend (e.g. SGLDOptions.attention_backend) outranks a
+# global forced backend; the global one applies only when no component override.
 @pytest.mark.parametrize(
-    ("global_backend", "expected_backend"),
+    ("global_backend", "component_backend", "expected_backend"),
     [
-        (None, AttentionBackendEnum.SUBBLOCK_SPARSE_ATTN),
-        (AttentionBackendEnum.FA, AttentionBackendEnum.FA),
+        (
+            None,
+            AttentionBackendEnum.SUBBLOCK_SPARSE_ATTN,
+            AttentionBackendEnum.SUBBLOCK_SPARSE_ATTN,
+        ),
+        (
+            AttentionBackendEnum.FA,
+            AttentionBackendEnum.SUBBLOCK_SPARSE_ATTN,
+            AttentionBackendEnum.SUBBLOCK_SPARSE_ATTN,
+        ),
+        (AttentionBackendEnum.FA, None, AttentionBackendEnum.FA),
     ],
 )
 def test_lazy_attention_resolution_preserves_backend_precedence(
-    global_backend, expected_backend
+    global_backend, component_backend, expected_backend
 ):
     model = MiniMaxH3DiTModel.__new__(MiniMaxH3DiTModel)
     torch.nn.Module.__init__(model)
     model.arch = SimpleNamespace(attention_head_dim=128)
-    model._component_attention_backend_override = (
-        AttentionBackendEnum.SUBBLOCK_SPARSE_ATTN
-    )
+    model._component_attention_backend_override = component_backend
     model._resolved_attention_backend = None
     backend = Mock()
     backend.get_enum.return_value = expected_backend
