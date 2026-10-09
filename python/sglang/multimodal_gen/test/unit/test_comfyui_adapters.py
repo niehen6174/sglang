@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pack / unpack contract for ComfyUI model adapters."""
 
+import pytest
 import torch
 
 from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.executors.adapter import (
@@ -56,3 +57,51 @@ def test_flux_pack_and_unpack_roundtrip() -> None:
 
     default = adapter.pack(x, timestep, context, y=y)
     assert default.guidance_scale == 3.5
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"patches_replace": {"dit": {("double_block", 3): object()}}},
+        {"patches": {"attn1_patch": [object()]}},
+        {"optimized_attention_override": object()},
+    ],
+)
+def test_comfy_model_patches_are_rejected_not_dropped(options) -> None:
+    """ComfyUI model patches (H3 Fun ControlNet block replace, attention
+    backend override) never reach the SGLD worker; they used to be ignored
+    and produce bit-identical output to the unpatched model."""
+    from types import SimpleNamespace
+
+    from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.executors.base import (
+        SGLDiffusionExecutor,
+    )
+
+    sent = []
+
+    class RecordingExecutor(SGLDiffusionExecutor):
+        def __init__(self):
+            torch.nn.Module.__init__(self)
+            self.adapter = FluxAdapter()
+
+        def _execute_packed(self, packed, x, timestep):
+            sent.append(packed)
+            return x
+
+    ex = RecordingExecutor()
+    x, t, context = (
+        torch.randn(1, 16, 8, 8),
+        torch.full((1,), 0.5),
+        torch.randn(1, 7, 32),
+    )
+    with pytest.raises(ValueError, match="cannot apply ComfyUI model patches"):
+        ex(x, t, context, y=torch.randn(1, 768), transformer_options=options)
+    assert sent == []
+    ex(
+        x,
+        t,
+        context,
+        y=torch.randn(1, 768),
+        transformer_options={"patches": {}, "patches_replace": {"dit": {}}},
+    )
+    assert len(sent) == 1
