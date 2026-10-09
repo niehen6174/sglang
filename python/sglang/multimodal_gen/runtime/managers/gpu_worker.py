@@ -1759,12 +1759,17 @@ def run_scheduler_process(
     from sglang.multimodal_gen.runtime.managers.scheduler import Scheduler
 
     try:
-        scheduler = Scheduler(
-            server_args,
-            gpu_id=rank,
-            port_args=port_args,
-            local_rank=local_rank,
-        )
+        try:
+            scheduler = Scheduler(
+                server_args,
+                gpu_id=rank,
+                port_args=port_args,
+                local_rank=local_rank,
+            )
+        except Exception as e:
+            # Without this the launcher only sees the pipe close (empty EOFError).
+            pipe_writer.send({"status": "error", "error": f"{type(e).__name__}: {e}"})
+            raise
         logger.info(f"Worker {rank}: Scheduler loop started.")
         pipe_writer.send(
             {
