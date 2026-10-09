@@ -53,6 +53,13 @@ def _spawn_without_launcher_main():
         main_dict.update(saved)
 
 
+def _has_vsa_gate(path: str) -> bool:
+    from safetensors import safe_open
+
+    with safe_open(path, framework="pt") as f:
+        return any(".to_gate_compress." in key for key in f.keys())
+
+
 def _reject_h3_vsa(sgld_options: dict) -> None:
     # The integrated step builds no VSA-H3 tile metadata (its tiles assume the
     # native packed row order); fail here instead of at the first step after load.
@@ -502,6 +509,12 @@ class SGLDiffusionGenerator:
         if model_type in ("minimax_h3", "fast_h3", "vdn_h3"):
             _reject_h3_vsa(sgld_options)
         if model_type == "minimax_h3" and not runtime_model_path:
+            if detect_path.endswith(".safetensors") and _has_vsa_gate(detect_path):
+                raise ValueError(
+                    "This is a FastH3 checkpoint (VSA gate weights), which the "
+                    "base MiniMax H3 model cannot load; set model_type fast_h3 "
+                    "with runtime_model_path pointing at the native FastH3 model"
+                )
             if sgld_options.get("minimax_h3_adaln_online") or sgld_options.get(
                 "minimax_h3_adaln_cache_path"
             ):
