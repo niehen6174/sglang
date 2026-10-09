@@ -1,4 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+from sglang.multimodal_gen.configs.pipeline_configs.qwen_image21 import (
+    QwenImage21PipelineConfig,
+)
+from sglang.multimodal_gen.configs.sample.qwenimage21 import QwenImage21SamplingParams
 from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 from sglang.multimodal_gen.runtime.pipelines_core import LoRAPipeline
 from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
@@ -14,6 +18,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.q
 
 class QwenImage21Pipeline(LoRAPipeline, ComposedPipelineBase):
     pipeline_name = "QwenImage21Pipeline"
+    # Config for a ComfyUI single-file DiT, which has no model_index.json.
+    pipeline_config_cls = QwenImage21PipelineConfig
+    sampling_params_cls = QwenImage21SamplingParams
     _required_config_modules = [
         "processor",
         "text_encoder",
@@ -47,6 +54,24 @@ class QwenImage21Pipeline(LoRAPipeline, ComposedPipelineBase):
             "denoising_stage",
         )
         self.add_standard_decoding_stage()
+
+    def create_comfyui_stages(self, server_args):
+        if server_args.enable_cfg_parallel:
+            # ComfyUI owns CFG; each CFG rank would recompute the same DiT call.
+            raise ValueError(
+                "enable_cfg_parallel is not supported for Qwen-Image 2.1 in "
+                "--comfyui-mode; use sp_degree or tp_size"
+            )
+        from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.qwen_image21_comfyui import (
+            QwenImage21ComfyUIStepStage,
+        )
+
+        self.add_stage(
+            QwenImage21ComfyUIStepStage(
+                transformer=self.get_module("transformer"),
+                scheduler=self.get_module("scheduler"),
+            )
+        )
 
 
 EntryClass = QwenImage21Pipeline
