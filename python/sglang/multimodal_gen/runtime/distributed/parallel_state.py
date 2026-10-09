@@ -407,9 +407,11 @@ def initialize_model_parallel(
         * tensor_parallel_degree
     )
 
-    if world_size < dit_parallel_size:
+    # Every rank must land in the layout; a surplus rank waits forever in new_group.
+    if world_size != dit_parallel_size + vae_parallel_size:
         raise RuntimeError(
-            f"world_size ({world_size}) is less than "
+            f"world_size ({world_size}) must equal vae_parallel_size "
+            f"({vae_parallel_size}) + "
             f"tensor_parallel_degree ({tensor_parallel_degree}) x "
             f"pipeline_parallel_degree ({pipeline_parallel_degree}) x"
             f"sequence_parallel_degree ({sequence_parallel_degree}) x"

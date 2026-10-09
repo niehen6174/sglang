@@ -3880,6 +3880,17 @@ class ServerArgs(DisaggServerArgsMixin):
                 f") = {num_gpus_per_group}"
             )
 
+        cfg_degree = self.cfg_parallel_degree if self.enable_cfg_parallel else 1
+        dit_world = self.dp_size * self.tp_size * self.sp_degree * cfg_degree
+        # Ranks outside the dp*tp*sp*cfg layout get no process group and
+        # deadlock in torch.distributed.new_group during worker startup.
+        if self.disagg_role == RoleType.MONOLITHIC and dit_world != self.num_gpus:
+            raise ValueError(
+                f"num_gpus ({self.num_gpus}) must equal dp_size * tp_size * "
+                f"sp_degree{' * cfg_parallel_degree' if self.enable_cfg_parallel else ''}"
+                f" = {dit_world}; leave sp_degree unset to fill the remaining GPUs"
+            )
+
         if self.sp_degree != self.ring_degree * self.ulysses_degree:
             raise ValueError(
                 f"sp_degree ({self.sp_degree}) must equal ring_degree * ulysses_degree "
