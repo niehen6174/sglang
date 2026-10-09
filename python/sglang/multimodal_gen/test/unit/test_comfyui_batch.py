@@ -116,7 +116,7 @@ def test_batched_request_has_two_generators_even_after_condition_cache_hit():
         assert req.batch_size == 2
         assert len(req.generator) == 2
         assert req.timesteps.numel() == 1
-        return SimpleNamespace(noise_pred=req.latents)
+        return SimpleNamespace(noise_pred=req.latents, error=None)
 
     ex.generator = SimpleNamespace(
         server_args=SimpleNamespace(attention_backend_config={}, enable_trace=False),
@@ -209,3 +209,33 @@ def test_options_preserves_native_batch_setting(enabled):
     exec(compile(ast.Module(body=[cls], type_ignores=[]), str(path), "exec"), namespace)
     options = namespace["SGLDOptions"]().create_options(enable_native_batch=enabled)[0]
     assert options["comfyui_native_batch"] is enabled
+
+
+def test_worker_error_is_raised_not_unpacked():
+    """A failed worker reply carries error and no noise_pred; unpacking it
+    replaced the worker's message with a misleading adapter TypeError."""
+    ex = RecordingExecutor(FluxAdapter())
+    ex.model_path = "/test-model"
+    ex.session_id, ex._run_id, ex._sent_conds = "error-test", 0, set()
+    ex.generator = SimpleNamespace(
+        server_args=SimpleNamespace(attention_backend_config={}, enable_trace=False),
+        _send_to_scheduler_and_wait_for_response=lambda requests: SimpleNamespace(
+            noise_pred=None, error="index_copy_(): shape mismatch"
+        ),
+    )
+    x, t, context, y = (
+        torch.randn(1, 16, 8, 8),
+        torch.full((1,), 0.5),
+        torch.randn(1, 7, 32),
+        torch.randn(1, 768),
+    )
+    with patch(
+        "sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.executors.base.SamplingParams.from_user_sampling_params_args",
+        side_effect=lambda model_path, server_args, **kw: SamplingParams(**kw),
+    ), patch(
+        "sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.executors.base.torch.Generator",
+        side_effect=lambda device: object(),
+    ):
+        packed = ex.adapter.pack(x, t, context, y=y)
+        with pytest.raises(RuntimeError, match="worker failed: index_copy_"):
+            SGLDiffusionExecutor._execute_packed(ex, packed, x, t)
