@@ -89,9 +89,7 @@ class MiniMaxH3Adapter(ComfyUIModelAdapter):
         if video.shape[0] != 1:
             # Same limit as ComfyUI's MiniMax H3 model: the checkpoint is
             # CFG-distilled and the packed sequence carries a single sample.
-            raise ValueError(
-                f"MiniMax H3 supports batch size 1, got {video.shape[0]}"
-            )
+            raise ValueError(f"MiniMax H3 supports batch size 1, got {video.shape[0]}")
         # PackedLayout is a ComfyUI class; the SGLD worker cannot unpickle it.
         payload = dict(kwargs.get("minimax_payload") or {})
         layout = payload.pop("layout", None)
