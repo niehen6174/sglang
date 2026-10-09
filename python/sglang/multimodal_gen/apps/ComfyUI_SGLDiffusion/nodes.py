@@ -82,6 +82,14 @@ class SGLDOptions:
                     "BOOLEAN",
                     {"default": False},
                 ),
+                "enable_native_batch": (
+                    "BOOLEAN",
+                    {"default": False},
+                ),
+                "allow_bf16_reduced_precision_reduction": (
+                    "BOOLEAN",
+                    {"default": True},
+                ),
                 "enable_cache_dit": (
                     "BOOLEAN",
                     {"default": False},
@@ -122,6 +130,8 @@ class SGLDOptions:
         enable_cache_dit: bool = False,
         quantization: str = "",
         transformer_weights_path: str = "",
+        allow_bf16_reduced_precision_reduction: bool = True,
+        enable_native_batch: bool = False,
     ):
         """
         Build a dictionary of SGLang Diffusion runtime options.
@@ -148,6 +158,8 @@ class SGLDOptions:
             "enable_cfg_parallel": enable_cfg_parallel,
             "attention_backend": attention_backend,
             "dit_layerwise_offload": dit_layerwise_offload,
+            "allow_bf16_reduced_precision_reduction": allow_bf16_reduced_precision_reduction,
+            "comfyui_native_batch": enable_native_batch,
         }
         if enable_cache_dit:
             options["enable_cache_dit"] = True
