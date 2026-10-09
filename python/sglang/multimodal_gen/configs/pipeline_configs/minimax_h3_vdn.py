@@ -89,10 +89,13 @@ def register():
             "OpenVDN/vdn-minimax-h3",
         ],
         model_detectors=[
-            lambda model_id: model_id.lower() == "vdnh3pipeline"
-            or (
-                "vdn" in model_id.lower()
-                and "minimaxh3" in model_id.lower().replace("-", "").replace("_", "")
+            lambda model_id: (
+                model_id.lower() == "vdnh3pipeline"
+                or (
+                    "vdn" in model_id.lower()
+                    and "minimaxh3"
+                    in model_id.lower().replace("-", "").replace("_", "")
+                )
             )
         ],
     )

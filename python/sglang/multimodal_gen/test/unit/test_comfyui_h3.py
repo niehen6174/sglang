@@ -1261,6 +1261,84 @@ def test_h3_pack_rejects_batched_latents() -> None:
         )
 
 
+def test_integrated_h3_float_checkpoint_accepts_online_convrot_int8(
+    tmp_path, monkeypatch
+):
+    """ServerArgs normalizes kitchen_int8 to convrot_int8; a BF16 H3 checkpoint
+    with runtime INT8 must build an online ConvRot config, not reject the name."""
+    _ensure_single_process_parallel_runtime()
+    from types import SimpleNamespace
+
+    from safetensors.torch import save_file
+
+    from sglang.multimodal_gen.configs.models.dits.minimax_h3 import MiniMaxH3DiTConfig
+    from sglang.multimodal_gen.runtime.layers.quantization.configs.convrot_int8_config import (
+        ConvRotInt8Config,
+    )
+    from sglang.multimodal_gen.runtime.loader.comfyui_checkpoints import spec
+    from sglang.multimodal_gen.runtime.loader.comfyui_checkpoints.minimax_h3 import (
+        _build_dit_config,
+    )
+
+    class _Built(Exception):
+        pass
+
+    built = {}
+
+    class SmallH3(torch.nn.Module):
+        param_names_mapping = {}
+        _fsdp_forward_methods = ()
+
+        def __init__(self, config, hf_config, quant_config=None):
+            built["quant_config"] = quant_config
+            raise _Built
+
+    path = tmp_path / "h3.safetensors"
+    save_file({"proj.weight": torch.ones(16, 256, dtype=torch.bfloat16)}, path)
+    monkeypatch.setattr(
+        spec.ModelRegistry, "resolve_model_cls", lambda _: (SmallH3, None)
+    )
+    monkeypatch.setattr(spec, "get_local_torch_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(
+        spec,
+        "get_comfyui_checkpoint_spec",
+        lambda _: spec.ComfyUICheckpointSpec(
+            dit_cls_name="MiniMaxH3DiTModel", build_dit_config=_build_dit_config
+        ),
+    )
+    monkeypatch.setenv("SGLANG_DIFFUSION_CONVROT_INT8_BACKEND", "comfy_kitchen")
+    arguments = SimpleNamespace(
+        pipeline_config=SimpleNamespace(
+            dit_config=MiniMaxH3DiTConfig(), dit_precision="bf16"
+        ),
+        model_paths={},
+        transformer_weights_path=None,
+        component_weights_paths={},
+        model_path=str(path),
+        dit_precision="bf16",
+        component_precisions={},
+        quantization="convrot_int8",
+        quantization_ignored_layers=["proj_out"],
+        nunchaku_config=None,
+        hsdp_replicate_dim=1,
+        hsdp_shard_dim=1,
+        pin_cpu_memory=False,
+        should_start_component_on_cpu=lambda _: True,
+        should_use_fsdp_for_component=lambda _: False,
+    )
+    pipeline = SimpleNamespace(
+        pipeline_name="MiniMaxH3Pipeline",
+        model_path=str(path),
+        get_module=lambda _: None,
+    )
+    with pytest.raises(_Built):
+        spec.load_comfyui_transformer(pipeline, arguments)
+    config = built["quant_config"]
+    assert isinstance(config, ConvRotInt8Config)
+    assert not config.is_checkpoint_int8_serialized
+    assert config.ignored_layers == ["proj_out"]
+
+
 def test_comfyui_sparse_stream_layout_preserves_target_and_condition_roles():
     layout = ComfyUIPackedLayout(
         3,
@@ -1283,6 +1361,7 @@ def test_comfyui_sparse_stream_layout_preserves_target_and_condition_roles():
 
 def test_h3_deferred_component_backend_wins_over_global_default(monkeypatch):
     from types import SimpleNamespace
+
     import sglang.multimodal_gen.runtime.models.dits.minimax_h3 as module
     from sglang.multimodal_gen.runtime.platforms.interface import AttentionBackendEnum
 
@@ -1312,6 +1391,7 @@ def test_h3_deferred_component_backend_wins_over_global_default(monkeypatch):
 @pytest.mark.parametrize("model_type,nfe", [("fast_h3", 4), ("vdn_h3", 8)])
 def test_distilled_h3_rejects_wrong_grid_and_reference_task(model_type, nfe):
     from types import SimpleNamespace
+
     from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.executors.minimax_h3 import (
         validate_distilled_h3_step,
     )
@@ -1336,6 +1416,7 @@ def test_distilled_h3_rejects_wrong_grid_and_reference_task(model_type, nfe):
 
 def test_comfyui_h3_bcg_support_uses_detected_architecture_not_filename():
     from types import SimpleNamespace
+
     from sglang.multimodal_gen.configs.pipeline_configs.minimax_h3 import (
         MiniMaxH3PipelineConfig,
     )
@@ -1391,10 +1472,12 @@ def test_h3_masked_velocities_match_comfyui_before_audio_carry_transform():
 
 def test_comfyui_h3_rejects_bcg_with_offload_before_cuda_capture():
     from types import SimpleNamespace
+
+    import pytest
+
     from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.stages.comfyui_step import (
         MiniMaxH3ComfyUIStepStage,
     )
-    import pytest
 
     batch = SimpleNamespace(sampling_params=SimpleNamespace(quality="lossless"))
     args = SimpleNamespace(
@@ -1409,8 +1492,8 @@ def test_sage3_packed_sequences_and_inactive_trailing_padding(monkeypatch):
 
     pytest.importorskip("sageattn3")
     from sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn3 import (
-        SageAttention3Impl,
         SageAttention3Backend,
+        SageAttention3Impl,
     )
 
     impl = SageAttention3Impl(1, 64, False, 0.125, packed_trailing_padding=True)

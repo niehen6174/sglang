@@ -172,6 +172,7 @@ def test_cached_base_model_resets_request_accelerations_after_spectrum_run():
 
 def test_failed_lora_request_does_not_claim_adapter_is_active():
     import pytest
+
     from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.executors.base import (
         SGLDiffusionExecutor,
     )
@@ -195,9 +196,9 @@ def test_failed_lora_request_does_not_claim_adapter_is_active():
 
 def test_comfyui_skips_synthetic_client_and_server_warmup():
     from sglang.multimodal_gen.runtime.server_warmup import (
+        SchedulerWarmupMixin,
         should_run_explicit_client_warmup,
         should_run_synthetic_server_warmup,
-        SchedulerWarmupMixin,
     )
 
     args = SimpleNamespace(
@@ -209,7 +210,9 @@ def test_comfyui_skips_synthetic_client_and_server_warmup():
     owner = SimpleNamespace(server_args=args, req_based_warmup_scheduled=False)
     requests = [(b"id", object())]
     assert (
-        SchedulerWarmupMixin.process_received_reqs_with_req_based_warmup(owner, requests)
+        SchedulerWarmupMixin.process_received_reqs_with_req_based_warmup(
+            owner, requests
+        )
         is requests
     )
 
