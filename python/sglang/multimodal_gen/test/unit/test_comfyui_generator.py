@@ -83,3 +83,21 @@ def test_kill_generator_only_touches_owned_workers() -> None:
     runtime.kill_generator()
     assert owned.terminated is True
     assert owned.killed is False
+
+
+def test_non_default_weight_dtype_is_rejected_before_worker_load() -> None:
+    """weight_dtype only reached the ComfyUI architecture companion, so fp8
+    produced output bit-identical to the default load."""
+    import pytest
+    import torch
+
+    runtime = SGLDiffusionGenerator()
+    runtime.get_comfyui_model = lambda *a: (_ for _ in ()).throw(
+        AssertionError("must reject before building the model")
+    )
+    with pytest.raises(ValueError, match="weight_dtype must be 'default'"):
+        runtime.load_model(
+            model_path="h3.safetensors",
+            model_options={"dtype": torch.float8_e4m3fn},
+            sgld_options={},
+        )
