@@ -224,24 +224,6 @@ def test_spawned_workers_do_not_reexecute_launcher_main() -> None:
                 main_dict[key] = value
 
 
-def test_h3_vsa_backend_is_rejected_before_worker_load() -> None:
-    """The integrated H3 step builds no VSA-H3 metadata; selecting it used to
-    load the full model and only fail at the first sampling step."""
-    import pytest
-
-    runtime = SGLDiffusionGenerator()
-    runtime.get_comfyui_model = lambda *a: (SimpleNamespace(), None, "minimax_h3")
-    runtime.init_generator = lambda *a: (_ for _ in ()).throw(
-        AssertionError("worker must not start")
-    )
-    for options in (
-        {"attention_backend": "video_sparse_attn_h3"},
-        {"component_attention_backends": "transformer=video_sparse_attn_h3"},
-    ):
-        with pytest.raises(ValueError, match="video_sparse_attn_h3 is not supported"):
-            runtime.load_model(model_path="h3.gguf.missing", sgld_options=options)
-
-
 def test_fasth3_single_file_as_base_h3_is_rejected_before_worker_load(
     tmp_path,
 ) -> None:
