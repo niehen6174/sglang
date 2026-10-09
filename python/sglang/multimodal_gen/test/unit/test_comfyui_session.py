@@ -1,7 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import uuid
+
 import torch
 
+from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.executors.adapter import (
+    ComfyUIModelAdapter,
+    PackedForward,
+)
+from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.executors.base import (
+    SGLDiffusionExecutor,
+)
+from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.executors.flux import FluxAdapter
+from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.executors.minimax_h3 import (
+    MiniMaxH3Adapter,
+)
+from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.executors.zimage import (
+    ZImageAdapter,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.comfyui_mode import (
     bind_comfyui_session,
     get_run_state,
@@ -185,6 +201,160 @@ def test_cond_keys_keep_positive_and_negative_apart() -> None:
     bind_comfyui_session(later_neg)
     assert torch.equal(later_pos.prompt_embeds[0], pos.prompt_embeds[0])
     assert torch.equal(later_neg.prompt_embeds[0], neg.prompt_embeds[0])
+    release_comfyui_session(sid)
+
+
+class _Executor(SGLDiffusionExecutor):
+    """Real executor bookkeeping, without a generator or model."""
+
+    def __init__(self, adapter):
+        torch.nn.Module.__init__(self)
+        self.adapter = adapter
+        self.session_id = uuid.uuid4().hex
+        self._run_id = 0
+        self._sent_conds = set()
+        self.begin_sampler_run()
+        self.sid = self.comfyui_session_id()
+
+    def send(self, packed) -> _Req:
+        """Executor half of _execute_packed, then the worker-side bind."""
+        self._mark_and_maybe_drop(packed)
+        req = _Req()
+        self.adapter.fill_req(req, packed)
+        req.extra = {
+            **(req.extra or {}),
+            "comfyui_session_id": self.sid,
+            "comfyui_cond_key": packed.extra_req["comfyui_cond_key"],
+        }
+        return bind_comfyui_session(req)
+
+
+def test_cond_key_flux_same_pooled_different_t5_not_conflated() -> None:
+    # ComfyUI's Flux pooled `y` comes from CLIP-L's first 77-token chunk only,
+    # so prompts that differ later share `y` but not the T5 context.
+    ex = _Executor(FluxAdapter())
+    x, t = torch.zeros(1, 16, 8, 8), torch.tensor([0.5])
+    y = torch.randn(1, 768)
+    ctx_a, ctx_b = torch.randn(1, 8, 4096), torch.randn(1, 8, 4096)
+    first = ex.send(ex.adapter.pack(x, t, ctx_a, y=y))
+    second = ex.send(ex.adapter.pack(x, t, ctx_b, y=y.clone()))
+    assert torch.equal(first.prompt_embeds[1], ctx_a)
+    assert torch.equal(second.prompt_embeds[1], ctx_b)
+    release_comfyui_session(ex.sid)
+
+
+def test_cond_key_same_first_last_scalar_not_conflated() -> None:
+    ex = _Executor(ZImageAdapter())
+    x, t = torch.zeros(1, 16, 8, 8), torch.tensor([0.5])
+    ctx_a, ctx_b = torch.randn(1, 6, 32), torch.randn(1, 6, 32)
+    ctx_b.view(-1)[0] = ctx_a.view(-1)[0]
+    ctx_b.view(-1)[-1] = ctx_a.view(-1)[-1]
+    ex.send(ex.adapter.pack(x, t, ctx_a))
+    second = ex.send(ex.adapter.pack(x, t, ctx_b))
+    assert torch.equal(second.prompt_embeds[0], ctx_b.squeeze(0))
+    release_comfyui_session(ex.sid)
+
+
+def test_cond_key_covers_image_latent() -> None:
+    def packed(image_latent):
+        return PackedForward(
+            latents=torch.zeros(1, 4, 8),
+            timesteps=torch.tensor([500.0]),
+            prompt_embeds=[torch.ones(3, 8)],
+            prompt_seq_lens=[[3]],
+            height=64,
+            width=64,
+            extra_req={"image_latent": image_latent},
+        )
+
+    ex = _Executor(ComfyUIModelAdapter())
+    ref_a, ref_b = torch.randn(1, 4, 8), torch.randn(1, 4, 8)
+    ex.send(packed(ref_a))
+    second = ex.send(packed(ref_b))
+    assert torch.equal(second.image_latent, ref_b)
+    release_comfyui_session(ex.sid)
+
+
+def test_cond_key_repeat_still_uses_cache() -> None:
+    ex = _Executor(FluxAdapter())
+    x, t = torch.zeros(1, 16, 8, 8), torch.tensor([0.5])
+    y, ctx = torch.randn(1, 768), torch.randn(1, 8, 4096)
+    ex.send(ex.adapter.pack(x, t, ctx, y=y))
+    # ComfyUI hands over fresh tensors each step; equal content must still hit.
+    repeat = ex.adapter.pack(x, t, ctx.clone(), y=y.clone())
+    restored = ex.send(repeat)
+    assert repeat.prompt_embeds == []
+    assert torch.equal(restored.prompt_embeds[1], ctx)
+    release_comfyui_session(ex.sid)
+
+
+def _h3_packed(text, payload):
+    return PackedForward(
+        latents=torch.zeros(1, 4, 2, 2),
+        timesteps=torch.tensor([500.0]),
+        prompt_embeds=[text],
+        prompt_seq_lens=[[int(text.shape[0])]],
+        height=2,
+        width=2,
+        extra_req={
+            "h3_payload": payload,
+            "h3_context": text,
+            "comfyui_cache_fp": {"spatial": (1, 2, 2)},
+        },
+    )
+
+
+def test_h3_cache_hit_restores_own_extras() -> None:
+    ex = _Executor(MiniMaxH3Adapter())
+    pos, neg = torch.ones(3, 4), torch.zeros(3, 4)
+    pos_payload, neg_payload = {"text_token_tags": [1, 2]}, {"text_token_tags": [3]}
+    ex.send(_h3_packed(pos, pos_payload))
+    ex.send(_h3_packed(neg, neg_payload))
+    later_pos = _h3_packed(pos.clone(), dict(pos_payload))
+    restored = ex.send(later_pos)
+    assert "h3_context" not in later_pos.extra_req  # cache hit, extras dropped
+    assert torch.equal(restored.extra["h3_context"], pos)
+    assert restored.extra["h3_payload"] == pos_payload
+    release_comfyui_session(ex.sid)
+
+
+def test_h3_same_text_different_payload_not_conflated() -> None:
+    ex = _Executor(MiniMaxH3Adapter())
+    text = torch.ones(3, 4)
+    ex.send(_h3_packed(text, {"refs": [torch.zeros(2, 2)]}))
+    second = ex.send(_h3_packed(text.clone(), {"refs": [torch.ones(2, 2)]}))
+    assert torch.equal(second.extra["h3_payload"]["refs"][0], torch.ones(2, 2))
+    release_comfyui_session(ex.sid)
+
+
+def test_cond_key_hashes_large_tensors_inside_lists() -> None:
+    ex = _Executor(MiniMaxH3Adapter())
+    text = torch.ones(3, 4)
+    latent_a = torch.zeros(4096)
+    latent_b = latent_a.clone()
+    latent_b[2048] = 1.0  # outside what repr() would print
+    key_a = ex._cond_key(_h3_packed(text, {"cond_video_latents": [latent_a]}))
+    key_b = ex._cond_key(_h3_packed(text, {"cond_video_latents": [latent_b]}))
+    assert key_a != key_b
+
+
+def test_extras_cached_per_cond_key() -> None:
+    sid = "exec4:1"
+    pos_ctx, neg_ctx = torch.ones(2, 4), torch.zeros(2, 4)
+    for key, ctx in (("pos", pos_ctx), ("neg", neg_ctx)):
+        req = _Req()
+        req.extra = {
+            "comfyui_session_id": sid,
+            "comfyui_cond_key": key,
+            "h3_context": ctx,
+        }
+        req.prompt_embeds = [ctx]
+        bind_comfyui_session(req)
+
+    later_pos = _Req()
+    later_pos.extra = {"comfyui_session_id": sid, "comfyui_cond_key": "pos"}
+    bind_comfyui_session(later_pos)
+    assert torch.equal(later_pos.extra["h3_context"], pos_ctx)
     release_comfyui_session(sid)
 
 
