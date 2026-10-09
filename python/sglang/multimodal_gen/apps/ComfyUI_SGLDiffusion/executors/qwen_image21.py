@@ -17,13 +17,6 @@ from .base import SGLDiffusionExecutor
 # Must match COND_EXTRA_KEY in the worker's qwen_image21_comfyui stage; not
 # imported so the ComfyUI process does not load the denoising stack.
 COND_EXTRA_KEY = "qwen21_cond"
-CFG_PARALLEL_UNSUPPORTED = (
-    "enable_cfg_parallel does not apply to Qwen-Image 2.1 in ComfyUI integrated "
-    "mode: ComfyUI runs CFG itself and sends cond and uncond as separate (or "
-    "batched) DiT calls, so every CFG rank would recompute the same call. Use "
-    "sp_degree=2 (Ulysses) or tp_size=2 to spread one call across GPUs."
-)
-
 # Spatial downscale of the Qwen-Image 2.1 VAE; latents are not patchified.
 _LATENT_SCALE = 16
 
@@ -146,19 +139,11 @@ def qwen_image21_cond_key(packed: PackedForward) -> tuple | None:
 
 class QwenImage21Executor(SGLDiffusionExecutor):
     adapter_cls = QwenImage21Adapter
+    supports_cfg_split = True
 
     def __init__(self, generator, model_path, model, config):
         super().__init__(generator, model_path, model, config)
         self.current_patcher = None
-
-    @classmethod
-    def validate_sgld_options(cls, sgld_options: dict | None) -> None:
-        options = sgld_options or {}
-        if (
-            options.get("enable_cfg_parallel")
-            or (options.get("cfg_parallel_degree") or 1) > 1
-        ):
-            raise ValueError(CFG_PARALLEL_UNSUPPORTED)
 
     def reset_prefix_cache(self, enabled):
         """ComfyUI's QwenImage21 calls this on pre_run / cleanup.

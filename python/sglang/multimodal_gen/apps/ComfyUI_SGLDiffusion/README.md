@@ -24,7 +24,7 @@ The plugin supports two modes of operation: **Server Mode** (via HTTP API) and *
 - **Z-Image**: High-speed image generation models (e.g., `Z-Image-Turbo`)
 - **FLUX**: State-of-the-art text-to-image models (e.g., `FLUX.1-dev`)
 - **Qwen-Image**: Multi-modal image generation models (e.g., `Qwen-Image`,`Qwen-Image-2512`). *Note: Image editing support is currently experimental and may have some issues.*
-- **Qwen-Image-2.1**: Integrated mode (`model_type=qwen_image21`, auto-detected) for Comfy-Org's single-file `qwen_image_2.1_bf16.safetensors` or the serialized INT8 ConvRot `qwen_image_2.1_int8_convrot.safetensors`. Text-to-image and reference-image edit (`TextEncodeQwenImage21` with images, up to the node's 16 references) follow the official templates; swap `UNETLoader` for `SGLDUNETLoader`. The text/reference prefix K/V is cached on the SGLang worker for each sampler run; `Qwen Image 2.1 Cache` `device` (auto / gpu / cpu / off) is honoured, its int8 / int4 `dtype` is not (the cache stays bf16). DiT model patches (Fun-Control, attention hooks) are not supported in integrated mode. LoRA: use `SGLDiffusion LoRA Loader` (diffusers / ComfyUI-format Qwen-Image-2.1 LoRAs, e.g. Viggle's 6-step turbo LoRA); a `LoraLoaderModelOnly` wired to an SGLD model raises. On the bf16 DiT the LoRA is merged into the weights (like ComfyUI's loader); on the INT8 ConvRot DiT it runs unmerged (dynamic), which costs about 35% per step.
+- **Qwen-Image-2.1**: Integrated mode (`model_type=qwen_image21`, auto-detected) for Comfy-Org's single-file `qwen_image_2.1_bf16.safetensors` or the serialized INT8 ConvRot `qwen_image_2.1_int8_convrot.safetensors`. Text-to-image and reference-image edit (`TextEncodeQwenImage21` with images, up to the node's 16 references) follow the official templates; swap `UNETLoader` for `SGLDUNETLoader`. The text/reference prefix K/V is cached on the SGLang worker for each sampler run; `Qwen Image 2.1 Cache` `device` (auto / gpu / cpu / off) is honoured, its int8 / int4 `dtype` is not (the cache stays bf16). DiT model patches (Fun-Control, attention hooks) are not supported in integrated mode. LoRA: use `SGLDiffusion LoRA Loader` (diffusers / ComfyUI-format Qwen-Image-2.1 LoRAs, e.g. Viggle's 6-step turbo LoRA); a `LoraLoaderModelOnly` wired to an SGLD model raises. On the bf16 DiT the LoRA is merged into the weights (like ComfyUI's loader); on the INT8 ConvRot DiT it runs unmerged (dynamic), which costs about 35% per step. Multi-GPU (`SGLDOptions`, `num_gpus=2`): `sp_degree=2` (Ulysses) or `tp_size=2` split each DiT call; `enable_cfg_parallel` instead runs each step's cond and uncond on one GPU each (CFG split, needs CFG > 1; steps with area / mask / hooks / ControlNet conds fall back to ComfyUI's sequential path).
 - **MiniMax-H3**: Joint video-and-audio DiT (`model_type=minimax_h3`). Integrated mode: T2V / I2VA / FL2VA use an `fl2va` checkpoint; R2V needs `ref2va`. CLIP and VAE stay in ComfyUI. Server mode uses `SGLDiffusion Generate MiniMax-H3`.
 
 ### Mode 1: Server Mode (HTTP API)
@@ -99,6 +99,19 @@ To use these workflows:
 2. Load the workflow JSON file from the `workflows/` directory.
 3. Adjust the parameters and model paths as needed.
 4. Run the workflow.
+
+### CFG split (`enable_cfg_parallel`)
+
+ComfyUI runs CFG itself: each sampler step evaluates the positive and the
+negative cond, one `apply_model` per cond (batched only when their shapes
+match). With `enable_cfg_parallel` and `num_gpus=2`, models that support it
+(`supports_cfg_split` on the executor; Qwen-Image-2.1) install a
+`CALC_COND_BATCH` wrapper that sends both cond calls of a step as one worker
+request; CFG rank `i` runs cond `i` and the velocities are all-gathered, so a
+step costs about one DiT forward. The wrapper reproduces `_calc_cond_batch`
+for two plain conds (strength, timestep range) and leaves everything else
+(area / mask conds, hooks, ControlNet, GLIGEN, model wrappers, CFG = 1) to
+ComfyUI. It cannot be combined with `sp_degree` / `tp_size`.
 
 ## Current Implementation
 

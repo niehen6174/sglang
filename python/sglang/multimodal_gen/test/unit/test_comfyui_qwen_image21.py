@@ -6,6 +6,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+try:  # ComfyUI is optional; without a GPU it must start in CPU mode.
+    import comfy.cli_args
+
+    if not torch.cuda.is_available():
+        comfy.cli_args.args.cpu = True
+except ImportError:
+    pass
+
 from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.executors.adapter import (
     PackedForward,
     get_adapter_class,
@@ -585,25 +593,35 @@ def test_pipeline_installs_comfyui_step_stage(monkeypatch) -> None:
     assert (
         QwenImage21Pipeline.pipeline_config_cls.__name__ == "QwenImage21PipelineConfig"
     )
-    with pytest.raises(ValueError, match="cfg_parallel"):
-        QwenImage21Pipeline.create_comfyui_stages(
-            _Pipe(), server_args=SimpleNamespace(enable_cfg_parallel=True)
-        )
+    import sglang.multimodal_gen.runtime.pipelines_core.stages.base as stage_base
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.comfyui_cfg_split import (
+        ComfyUICFGSplitStage,
+    )
+
+    monkeypatch.setattr(stage_base, "get_global_server_args", lambda: None)
+    split = _Pipe()
+    QwenImage21Pipeline.create_comfyui_stages(
+        split,
+        server_args=SimpleNamespace(enable_cfg_parallel=True, sp_degree=1, tp_size=1),
+    )
+    # CFG split: the step stage runs one cond per CFG rank.
+    (wrapper,) = split.stages
+    assert isinstance(wrapper, ComfyUICFGSplitStage)
+    assert isinstance(wrapper.step_stage, QwenImage21ComfyUIStepStage)
+    for parallel in ({"sp_degree": 2, "tp_size": 1}, {"sp_degree": 1, "tp_size": 2}):
+        with pytest.raises(ValueError, match="not supported"):
+            QwenImage21Pipeline.create_comfyui_stages(
+                _Pipe(),
+                server_args=SimpleNamespace(enable_cfg_parallel=True, **parallel),
+            )
 
 
 # ----- multi-GPU -----------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "options",
-    [{"enable_cfg_parallel": True}, {"cfg_parallel_degree": 2}],
-)
-def test_cfg_parallel_is_rejected_before_the_worker_starts(options) -> None:
-    """ComfyUI owns CFG, so a CFG rank would only recompute the same DiT call."""
-    with pytest.raises(ValueError, match="does not apply"):
-        QwenImage21Executor.validate_sgld_options({"num_gpus": 2, **options})
-    QwenImage21Executor.validate_sgld_options({"num_gpus": 2, "sp_degree": 2})
-    QwenImage21Executor.validate_sgld_options(None)
+def test_qwen_image21_runs_cfg_split() -> None:
+    options = {"num_gpus": 2, "enable_cfg_parallel": True}
+    assert QwenImage21Executor.cfg_split_ranks_for(options) == 2
 
 
 def test_sp_needs_a_token_count_divisible_by_the_sp_degree(monkeypatch) -> None:
@@ -641,23 +659,33 @@ def test_sp_needs_a_token_count_divisible_by_the_sp_degree(monkeypatch) -> None:
 
 
 def test_prefix_cache_placement_is_agreed_across_ranks(monkeypatch) -> None:
-    """Under TP an uncached prefix runs extra all-reduces, so ranks must not split."""
-    seen = {}
+    """Under TP an uncached prefix runs extra all-reduces, so ranks must not split.
+
+    Only ranks that run the same DiT call agree; CFG-split ranks run different
+    conds at different times, so including them would deadlock.
+    """
+    seen = []
 
     def all_reduce(tensor, op=None, group=None):
-        seen["group"] = group
+        seen.append(group)
         tensor.copy_(torch.minimum(tensor, torch.tensor([3, 5])))
 
-    monkeypatch.setattr(stage_mod, "world_group_is_initialized", lambda: True)
-    monkeypatch.setattr(
-        stage_mod,
-        "get_world_group",
-        lambda: SimpleNamespace(world_size=2, cpu_group="cpu-group"),
-    )
+    def group(name, size):
+        return SimpleNamespace(world_size=size, cpu_group=name)
+
+    monkeypatch.setattr(stage_mod, "model_parallel_is_initialized", lambda: True)
+    monkeypatch.setattr(stage_mod, "get_tp_group", lambda: group("tp", 2))
+    monkeypatch.setattr(stage_mod, "get_sp_group", lambda: group("sp", 1))
     monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
     free_gpu, free_host = stage_mod._free_memory(torch.device("cpu"))
     assert (free_gpu, free_host) == (0, 5)
-    assert seen["group"] == "cpu-group"
+    assert seen == ["tp"]
+
+    # CFG split (tp = sp = 1): no collective at all.
+    seen.clear()
+    monkeypatch.setattr(stage_mod, "get_tp_group", lambda: group("tp", 1))
+    stage_mod._free_memory(torch.device("cpu"))
+    assert seen == []
 
 
 def test_failed_worker_step_raises_with_the_worker_error(monkeypatch) -> None:

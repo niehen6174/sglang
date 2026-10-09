@@ -16,10 +16,11 @@ from typing import Any
 import msgspec
 import torch
 
-from sglang.multimodal_gen.runtime.distributed import get_sp_world_size
-from sglang.multimodal_gen.runtime.distributed.parallel_state import (
-    get_world_group,
-    world_group_is_initialized,
+from sglang.multimodal_gen.runtime.distributed import (
+    get_sp_group,
+    get_sp_world_size,
+    get_tp_group,
+    model_parallel_is_initialized,
 )
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
 from sglang.multimodal_gen.runtime.pipelines_core.comfyui_mode import (
@@ -268,17 +269,22 @@ def _free_memory(device) -> tuple[int, int]:
             torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
         )
     free = (free_gpu, int(psutil.virtual_memory().available))
-    if world_group_is_initialized() and get_world_group().world_size > 1:
-        # Every rank must take the same cached / recompute path: under TP the
-        # uncached prefix runs extra all-reduces, so a split decision hangs.
+    # The ranks that run one DiT call together must take the same cached /
+    # recompute path: under TP the uncached prefix runs extra all-reduces, so a
+    # split decision hangs. CFG ranks run different calls and must not join.
+    for group in _call_groups():
         agreed = torch.tensor(free, dtype=torch.int64)
         torch.distributed.all_reduce(
-            agreed,
-            op=torch.distributed.ReduceOp.MIN,
-            group=get_world_group().cpu_group,
+            agreed, op=torch.distributed.ReduceOp.MIN, group=group.cpu_group
         )
         free = tuple(int(v) for v in agreed.tolist())
     return free
+
+
+def _call_groups() -> list:
+    if not model_parallel_is_initialized():
+        return []
+    return [g for g in (get_tp_group(), get_sp_group()) if g.world_size > 1]
 
 
 class QwenImage21ComfyUIStepStage(QwenImage21DenoisingStage):

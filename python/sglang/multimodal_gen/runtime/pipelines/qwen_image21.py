@@ -56,22 +56,26 @@ class QwenImage21Pipeline(LoRAPipeline, ComposedPipelineBase):
         self.add_standard_decoding_stage()
 
     def create_comfyui_stages(self, server_args):
-        if server_args.enable_cfg_parallel:
-            # ComfyUI owns CFG; each CFG rank would recompute the same DiT call.
-            raise ValueError(
-                "enable_cfg_parallel is not supported for Qwen-Image 2.1 in "
-                "--comfyui-mode; use sp_degree or tp_size"
-            )
+        from sglang.multimodal_gen.runtime.pipelines_core.stages.comfyui_cfg_split import (
+            ComfyUICFGSplitStage,
+        )
         from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.qwen_image21_comfyui import (
             QwenImage21ComfyUIStepStage,
         )
 
-        self.add_stage(
-            QwenImage21ComfyUIStepStage(
-                transformer=self.get_module("transformer"),
-                scheduler=self.get_module("scheduler"),
-            )
+        stage = QwenImage21ComfyUIStepStage(
+            transformer=self.get_module("transformer"),
+            scheduler=self.get_module("scheduler"),
         )
+        if server_args.enable_cfg_parallel:
+            if server_args.sp_degree > 1 or server_args.tp_size > 1:
+                raise ValueError(
+                    "Qwen-Image 2.1 CFG split in --comfyui-mode runs one cond per "
+                    "GPU; combining it with sp_degree / tp_size is not supported"
+                )
+            # ComfyUI owns CFG: each CFG rank runs one of the step's conds.
+            stage = ComfyUICFGSplitStage(stage)
+        self.add_stage(stage)
 
 
 EntryClass = QwenImage21Pipeline
