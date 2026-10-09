@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """SGLDLoraLoader: chained LoRA nodes must keep every LoRA active."""
 
+import copy
 import sys
 import types
 from types import SimpleNamespace
@@ -32,9 +33,12 @@ class _Model:
     def __init__(self, executor, patches=None):
         self.model = SimpleNamespace(diffusion_model=executor)
         self.patches = dict(patches or {})
+        self.model_options = {}
 
     def clone(self):
-        return _Model(self.model.diffusion_model, self.patches)
+        clone = _Model(self.model.diffusion_model, self.patches)
+        clone.model_options = copy.deepcopy(self.model_options)
+        return clone
 
 
 def test_chained_lora_nodes_keep_every_lora() -> None:
@@ -47,11 +51,11 @@ def test_chained_lora_nodes_keep_every_lora() -> None:
     (first,) = loader.load_lora(base, "style.safetensors", 1.0, nickname="style")
     (second,) = loader.load_lora(first, "detail.safetensors", 0.8, nickname="detail")
 
-    # The worker's set_lora replaces the active set, so the last call must
-    # carry both LoRAs.
-    assert calls[-1]["lora_nickname"] == ["style", "detail"]
-    assert calls[-1]["strength"] == [1.0, 0.8]
-    assert calls[-1]["lora_path"] == [
+    assert calls == []
+    desired = second.model_options["sgld_lora_input"]
+    assert desired["lora_nickname"] == ["style", "detail"]
+    assert desired["strength"] == [1.0, 0.8]
+    assert desired["lora_path"] == [
         "/loras/style.safetensors",
         "/loras/detail.safetensors",
     ]
