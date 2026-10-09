@@ -231,12 +231,20 @@ class SGLDiffusionGenerator:
         # reloads the DiT from CPU.
         kwargs.setdefault("dit_cpu_offload", False)
         kwargs = self._server_args_kwargs(kwargs)
-        with _isolated_worker_spawn():
-            self.generator = DiffGenerator.from_pretrained(
-                model_path=model_path,
-                pipeline_class_name=pipeline_class_name,
-                **kwargs,
-            )
+        try:
+            with _isolated_worker_spawn():
+                self.generator = DiffGenerator.from_pretrained(
+                    model_path=model_path,
+                    pipeline_class_name=pipeline_class_name,
+                    **kwargs,
+                )
+        except EOFError as exc:
+            # launch_server only sees the closed pipe; the worker logged the cause.
+            raise RuntimeError(
+                "The SGLD worker exited during startup; its traceback is in the "
+                "ComfyUI log above (e.g. an unsupported parallel / attention "
+                "backend combination)"
+            ) from exc
         return self.generator
 
     @staticmethod
@@ -466,11 +474,12 @@ class SGLDiffusionGenerator:
             model_type = set_model_type
 
         pipeline_class_name = self.pipeline_class_dict[model_type]
+        executor_class = self.executor_class_dict[model_type]
+        executor_class.validate_sgld_options(sgld_options)
         self.generator = self.init_generator(
             detect_path, pipeline_class_name, sgld_options
         )
 
-        executor_class = self.executor_class_dict[model_type]
         self.executor = executor_class(
             self.generator, detect_path, comfyui_model, model_config
         )

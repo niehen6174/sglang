@@ -100,6 +100,10 @@ class SGLDiffusionExecutor(torch.nn.Module):
         self._run_id = 0
         self._sent_conds: set[tuple] = set()
 
+    @classmethod
+    def validate_sgld_options(cls, sgld_options: dict | None) -> None:
+        """Reject SGLDOptions this model cannot honour, before the worker starts."""
+
     def state_dict(self, *args, destination=None, prefix="", keep_vars=False):
         """Header-only view of the served DiT: names with empty placeholders.
 
@@ -233,6 +237,12 @@ class SGLDiffusionExecutor(torch.nn.Module):
             torch.Generator("cuda") for _ in range(req.num_outputs_per_prompt)
         ]
         output_batch = self.generator._send_to_scheduler_and_wait_for_response([req])
+        if output_batch.noise_pred is None:
+            # The worker reports a failed step as an error string, not an exception.
+            raise RuntimeError(
+                "SGLD worker failed this DiT step: "
+                f"{output_batch.error or 'no noise_pred returned'}"
+            )
         return self.adapter.unpack(output_batch.noise_pred, packed, x)
 
     def forward(self, x, timestep, context, **kwargs):

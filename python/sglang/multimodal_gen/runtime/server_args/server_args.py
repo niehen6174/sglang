@@ -1525,6 +1525,9 @@ class ServerArgs(DisaggServerArgsMixin):
                     and sp_unspecified
                     and ulysses_unspecified
                     and ring_unspecified
+                    # ComfyUI owns CFG in comfyui_mode; a single-file DiT also has
+                    # no model_index.json for the default-sampling lookup.
+                    and not self.comfyui_mode
                     and self._model_default_uses_cfg()
                 ):
                     self.cfg_parallel_degree = auto_cfg_parallel_degree
