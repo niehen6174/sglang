@@ -77,7 +77,9 @@ def _can_stage_h3_online_mxfp8(
         and runtime_device.type == "cuda"
         and not use_fsdp
         and runtime_quant_config is not None
-        and runtime_quant_config.get_name() == "mxfp8"
+        # Online fp8 is per-tensor on Hopper (VDN maps it to mxfp8 only on SM100+);
+        # both quantize each linear independently, so staging is exact.
+        and runtime_quant_config.get_name() in ("mxfp8", "fp8")
         and not getattr(runtime_quant_config, "is_checkpoint_fp8_serialized", True)
     )
 
@@ -537,7 +539,10 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
                 defer_cpu_placement=False,
                 layerwise_quant_postprocess_device=local_torch_device,
             )
-            logger.info("Loading H3 MXFP8 on CPU with per-linear CUDA postprocessing")
+            logger.info(
+                "Loading H3 online %s on CPU with per-linear CUDA postprocessing",
+                quant_spec.runtime_quant_config.get_name(),
+            )
         if direct_gpu_weight_loading:
             logger.warning(
                 "Direct GPU weight loading is enabled for %s; compatible checkpoint "

@@ -35,6 +35,22 @@ from sglang.multimodal_gen.runtime.utils import quantization_utils
                     get_name=lambda: "fp8", is_checkpoint_fp8_serialized=False
                 )
             },
+            True,
+        ),
+        (
+            {
+                "runtime_quant_config": SimpleNamespace(
+                    get_name=lambda: "fp8", is_checkpoint_fp8_serialized=True
+                )
+            },
+            False,
+        ),
+        (
+            {
+                "runtime_quant_config": SimpleNamespace(
+                    get_name=lambda: "kitchen_int8", is_checkpoint_fp8_serialized=False
+                )
+            },
             False,
         ),
         (
@@ -185,3 +201,43 @@ def test_online_mxfp8_gpu_postprocess_returns_quantized_weights_to_cpu():
     expected = x @ _weights()["first.weight"].to("cuda").t()
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected, rtol=0.3, atol=0.01)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA FP8 kernels")
+def test_online_fp8_staging_matches_full_gpu_postprocess(monkeypatch):
+    """Per-linear staging of online fp8 must quantize exactly like the full-GPU path."""
+    from sglang.multimodal_gen.runtime.distributed.parallel_state import (
+        maybe_init_distributed_environment_and_model_parallel,
+        model_parallel_is_initialized,
+    )
+    from sglang.multimodal_gen.runtime.layers.quantization.fp8 import Fp8Config
+    from sglang.multimodal_gen.test.single_test_file.component_accuracy.utils import (
+        ensure_distributed_env_defaults,
+    )
+
+    if not model_parallel_is_initialized():
+        ensure_distributed_env_defaults()
+        maybe_init_distributed_environment_and_model_parallel(tp_size=1, sp_size=1)
+    staged = _load(
+        Fp8Config(),
+        WeightLoadPlan(
+            checkpoint_load_device=torch.device("cpu"),
+            layerwise_quant_postprocess_device=torch.device("cuda:0"),
+        ),
+    )
+    # The reference path moves every parameter to CUDA, the fixture's sentinel included.
+    monkeypatch.setattr(_TinyModel, "post_load_weights", lambda self: None)
+    full = _load(
+        Fp8Config(),
+        WeightLoadPlan(
+            checkpoint_load_device=torch.device("cpu"),
+            weight_postprocess_device=torch.device("cuda:0"),
+            defer_cpu_placement=True,
+        ),
+    )
+    for name in ["first", "second"]:
+        a, b = getattr(staged, name), getattr(full, name)
+        assert a.weight.device.type == "cpu"
+        assert a.weight.dtype == b.weight.dtype
+        assert torch.equal(a.weight.cpu().view(torch.uint8), b.weight.cpu().view(torch.uint8))
+        assert torch.equal(a.weight_scale.cpu(), b.weight_scale.cpu())
