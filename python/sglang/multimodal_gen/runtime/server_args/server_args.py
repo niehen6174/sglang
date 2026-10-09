@@ -3863,6 +3863,15 @@ class ServerArgs(DisaggServerArgsMixin):
         if self.dp_size < 1:
             raise ValueError("--dp-size must be a natural number")
 
+        if self.dp_size > 1 and self.comfyui_mode:
+            # Each sampler step is one request carrying CUDA IPC tensors from the
+            # ComfyUI process, and ComfyUI runs one prompt at a time.
+            raise ValueError(
+                "dp_size > 1 is not supported in ComfyUI integrated mode: replicas "
+                "never overlap behind ComfyUI's single prompt queue. Run one ComfyUI "
+                "instance per GPU, or use tp_size / sp_degree for one request."
+            )
+
         if self.dp_size > 1 and self.disagg_role != RoleType.MONOLITHIC:
             raise ValueError(
                 "--dp-size > 1 is only supported for monolithic serving; "
