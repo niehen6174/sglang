@@ -41,6 +41,32 @@ Evidence: /scratch/data/sgld_comfy/results/comfyui-wan-20261009/
 runs, logs, media and reproducible local tools). Failed exploratory loading,
 FP32 and ineffective-LoRA runs remain preserved separately.
 
+## Official template validation
+
+A separate six-request API comparison used the published ComfyUI templates
+at revision `8be1f8c4b5af2d550d70922a23b79cee599e1f3e`:
+Wan 2.1 T2V 832×480/33 frames/30 steps/CFG 6 and Wan 2.2 T2V + I2V
+1280×704/121 frames/20 steps/CFG 5. All native and SGLD requests passed,
+including KSampler, VAE decode, CreateVideo and SaveVideo. Resolution,
+frame count, prompts, seeds and sampling settings were retained. I2V
+activates the template's disabled LoadImage with a supplied generated fox
+first frame. API conversion adapts SaveVideo's dynamic fields for ComfyUI
+0.38.0 and changes filenames for isolation. The first exploratory pair
+failed only due to the converter's SaveVideo parameter encoding; the
+corrected full requests passed without further runtime code changes.
+
+Native/SGLD end-to-end seconds: 28.17/47.45 (Wan 2.1 T2V),
+136.86/151.77 (Wan 2.2 T2V), 141.02/156.49 (Wan 2.2 I2V).
+These include load/text/sample/VAE/save and are single requests, not
+controlled performance benchmarks. No speedup is established. Output
+scenes look similar but details differ; no pixel-equivalence claim.
+Three reproducible official-default API graphs are included; the I2V
+example requires a user image in place of `example.png`.
+
+Evidence: /scratch/data/sgld_comfy/results/comfyui-wan-official-20261009/
+(templates, sources.json, manifest.json, validation.json, runs, logs,
+media, tools and CONCLUSIONS.txt).
+
 ## Scope and dependency
 
 Branch: codex/feat-comfyui-wan. Base: codex/fix-comfyui-native-batch at

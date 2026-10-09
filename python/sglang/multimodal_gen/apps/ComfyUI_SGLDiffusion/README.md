@@ -112,6 +112,26 @@ functional example, not a production quality preset. Install the matching DiT
 in `diffusion_models`, UMT5 in `text_encoders`,
 and Wan 2.1 / 2.2 VAE in `vae`.
 
+Additional API examples preserve the published ComfyUI template defaults:
+
+- `wan21_official_t2v_sgld_api.json`: 832×480, 33 frames, 30 UniPC steps, CFG 6, 16 FPS.
+- `wan22_official_t2v_sgld_api.json`: 1280×704, 121 frames, 20 UniPC steps, CFG 5, 24 FPS.
+- `wan22_official_i2v_sgld_api.json`: the same Wan 2.2 defaults with the template's image input enabled; set `LoadImage.image` to a file in ComfyUI's input directory (`example.png` is a placeholder).
+
+These derive from Comfy-Org/workflow_templates revision
+`8be1f8c4b5af2d550d70922a23b79cee599e1f3e`:
+[text_to_video_wan.json](https://github.com/Comfy-Org/workflow_templates/blob/8be1f8c4b5af2d550d70922a23b79cee599e1f3e/templates/text_to_video_wan.json)
+and [video_wan2_2_5B_ti2v.json](https://github.com/Comfy-Org/workflow_templates/blob/8be1f8c4b5af2d550d70922a23b79cee599e1f3e/templates/video_wan2_2_5B_ti2v.json).
+They retain KSampler, prompts, published seeds, ModelSamplingSD3 shift 8,
+UMT5, VAE decode, CreateVideo and SaveVideo. Only UNETLoader is replaced
+and SGLDOptions added. Output filenames are changed for isolation; SaveVideo
+format/codec widgets are translated to the installed ComfyUI 0.38.0 dynamic
+API fields. All three paths passed both native and SGLD API execution on an
+RTX 5090 32 GB without reducing resolution, frame count or sampling steps.
+These are API graphs, not UI-format exports. Single-request end-to-end
+SGLD times were higher than native; these checks establish compatibility,
+not a speedup or pixel-identical output.
+
 For other workflows supporting the models, you can easily use SGLang by replacing the official `UNET Loader` node with the `SGLDUNETLoader` node. Similarly, for LoRA support, replace the official LoRA loader with the `SGLDiffusion LoRA Loader`.
 
 To use these workflows:
