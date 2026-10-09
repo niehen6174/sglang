@@ -18,6 +18,9 @@ from sglang.multimodal_gen.runtime.disaggregation.roles import (
     RoleType,
     filter_modules_for_role,
 )
+from sglang.multimodal_gen.runtime.layers.attention.selector import (
+    component_attn_backend_context_manager,
+)
 from sglang.multimodal_gen.runtime.loader.comfyui_checkpoints import (
     is_comfyui_single_file,
     load_comfyui_transformer,
@@ -445,7 +448,22 @@ class ComposedPipelineBase(ABC):
         If provided, loaded_modules will be used instead of loading from config/pretrained weights.
         """
         if is_comfyui_mode(server_args) and is_comfyui_single_file(self.model_path):
-            return load_comfyui_transformer(self, server_args, loaded_modules)
+            # Same component attention selection as the regular component loader;
+            # without it --component-attention-backends never reaches the DiT.
+            attn_backend, backend_key = server_args.resolve_component_attention_backend(
+                "transformer"
+            )
+            component_name = backend_key or "transformer"
+            with component_attn_backend_context_manager(
+                attn_backend,
+                component_name=component_name,
+                allow_global_backend_fallback=True,
+                require_backend_selection=(
+                    server_args.requested_component_attention_backend(component_name)
+                    is not None
+                ),
+            ):
+                return load_comfyui_transformer(self, server_args, loaded_modules)
 
         model_index = self._load_config()
         logger.info("Loading pipeline modules from config: %s", model_index)
@@ -505,9 +523,9 @@ class ComposedPipelineBase(ABC):
         self._validate_direct_gpu_component_selection(model_index, server_args)
 
         # some sanity checks
-        assert len(model_index) > 1, (
-            "model_index.json must contain at least one pipeline module"
-        )
+        assert (
+            len(model_index) > 1
+        ), "model_index.json must contain at least one pipeline module"
 
         # In disagg mode, read HF config for skipped components (e.g., VAE)
         # so that update_model_arch + post_init can derive pipeline_config.

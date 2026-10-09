@@ -352,3 +352,43 @@ class TestComponentLoaderIdentity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestComfyUISingleFileAttentionBackend(unittest.TestCase):
+    def test_single_file_dit_load_sees_component_attention_backend(self):
+        """ComfyUI single-file DiT loads bypassed the component loader, so
+        --component-attention-backends transformer=... was silently ignored."""
+        from sglang.multimodal_gen.runtime.layers.attention import selector
+        from sglang.multimodal_gen.runtime.pipelines_core import composed_pipeline_base
+        from sglang.multimodal_gen.runtime.platforms.interface import (
+            AttentionBackendEnum,
+        )
+
+        seen = []
+        server_args = SimpleNamespace(
+            resolve_component_attention_backend=lambda *_names: (
+                AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3,
+                "transformer",
+            ),
+            requested_component_attention_backend=lambda _name: None,
+        )
+        pipeline = SimpleNamespace(model_path="h3.safetensors")
+        with (
+            patch.object(composed_pipeline_base, "is_comfyui_mode", lambda _: True),
+            patch.object(
+                composed_pipeline_base, "is_comfyui_single_file", lambda _: True
+            ),
+            patch.object(
+                composed_pipeline_base,
+                "load_comfyui_transformer",
+                lambda *_args: seen.append(
+                    selector.get_component_attn_backend_context()
+                )
+                or {},
+            ),
+        ):
+            composed_pipeline_base.ComposedPipelineBase.load_modules(
+                pipeline, server_args
+            )
+        self.assertEqual(seen[0].backend, AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3)
+        self.assertEqual(seen[0].component_name, "transformer")
