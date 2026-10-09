@@ -9,7 +9,9 @@ import torch
 
 try:
     from vsa import video_sparse_attn
-except ImportError:
+except (ImportError, RuntimeError):
+    # Some vsa builds query the CUDA device at import and raise RuntimeError
+    # without a visible GPU; CPU-only imports of this module must still work.
     video_sparse_attn = None
 
 from typing import Any
