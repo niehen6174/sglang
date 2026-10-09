@@ -7,18 +7,21 @@ import os
 import pathlib
 import shutil
 import subprocess
-import threading
 import time
 import traceback
 import urllib.request
 import uuid
 
-import pynvml
 import websocket
+from h3_gpu_monitor import GpuMonitor
 
 ROOT = pathlib.Path(os.environ["H3_BENCH_WORKSPACE"]).resolve()
 SUITE = pathlib.Path(os.environ["H3_BENCH_SUITE"]).resolve()
-BASE = "http://127.0.0.1:8188"
+HOST = os.environ.get("H3_BENCH_HOST", "127.0.0.1:8188")
+BASE = "http://" + HOST
+SERVER_LOG = pathlib.Path(
+    os.environ.get("H3_BENCH_SERVER_LOG", ROOT / "logs/comfyui-server.log")
+)
 
 
 def api(path, data=None):
@@ -185,8 +188,10 @@ def main():
             if key not in replacements
         }
     summaries = []
-    pynvml.nvmlInit()
-    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+    gpu = GpuMonitor()
+    (SUITE / (args.case + "-gpus.json")).write_text(
+        json.dumps({"host": HOST, "gpus": gpu.identity}, indent=2)
+    )
     for i in range(args.runs):
         if shutil.disk_usage(ROOT).free < 100 * 2**30:
             raise RuntimeError("Data disk reserve exhausted")
@@ -212,38 +217,17 @@ def main():
         (out / "workflow.json").write_text(json.dumps(w, indent=2))
         client = uuid.uuid4().hex
         ws = websocket.create_connection(
-            "ws://127.0.0.1:8188/ws?clientId=" + client, timeout=1800
+            "ws://" + HOST + "/ws?clientId=" + client, timeout=1800
         )
-        samples = []
-        stop = threading.Event()
-
-        def monitor():
-            while not stop.is_set():
-                samples.append(
-                    {
-                        "seconds": time.perf_counter() - start,
-                        "used_gib": pynvml.nvmlDeviceGetMemoryInfo(handle).used / 2**30,
-                        "util": pynvml.nvmlDeviceGetUtilizationRates(handle).gpu,
-                        "sm_mhz": pynvml.nvmlDeviceGetClockInfo(
-                            handle, pynvml.NVML_CLOCK_SM
-                        ),
-                        "temperature_c": pynvml.nvmlDeviceGetTemperature(
-                            handle, pynvml.NVML_TEMPERATURE_GPU
-                        ),
-                        "power_w": pynvml.nvmlDeviceGetPowerUsage(handle) / 1000,
-                    }
-                )
-                stop.wait(0.25)
-
         perf_dir = os.environ.get("SGLANG_PERF_LOG_DIR")
         perf = pathlib.Path(perf_dir) / "performance.log" if perf_dir else None
         perf_offset = perf.stat().st_size if perf is not None and perf.exists() else 0
-        log = ROOT / "logs/comfyui-server.log"
+        log = SERVER_LOG
         offset = log.stat().st_size
         events = []
+        processes_before = gpu.processes()
         start = time.perf_counter()
-        thread = threading.Thread(target=monitor, daemon=True)
-        thread.start()
+        samples, finish_samples = gpu.start(start)
         try:
             accepted = api("/prompt", {"prompt": w, "client_id": client})
             pid = accepted["prompt_id"]
@@ -373,7 +357,8 @@ def main():
                 "instrumented": not args.plain,
                 "node_intervals": intervals,
                 "media": media,
-                "peak_gpu_gib": max(r["used_gib"] for r in samples),
+                **GpuMonitor.peaks(samples),
+                "gpu_processes_before": processes_before,
             }
             if perf is not None and perf.exists():
                 with perf.open("rb") as stream:
@@ -416,8 +401,7 @@ def main():
             )
             raise
         finally:
-            stop.set()
-            thread.join(timeout=2)
+            finish_samples()
             ws.close()
             (out / "events.json").write_text(json.dumps(events, indent=2))
             (out / "gpu-samples.json").write_text(json.dumps(samples, indent=2))
@@ -425,7 +409,7 @@ def main():
                 stream.seek(offset)
                 (out / "server.log").write_bytes(stream.read())
         time.sleep(2)
-    pynvml.nvmlShutdown()
+    gpu.shutdown()
 
 
 if __name__ == "__main__":

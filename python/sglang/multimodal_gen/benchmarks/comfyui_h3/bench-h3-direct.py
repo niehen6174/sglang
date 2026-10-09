@@ -7,12 +7,11 @@ import json
 import os
 import pathlib
 import subprocess
-import threading
 import time
 import traceback
 
 import torch
-import pynvml
+from h3_gpu_monitor import GpuMonitor
 from sglang.multimodal_gen import DiffGenerator
 from sglang.multimodal_gen.configs.pipeline_configs.minimax_h3 import (
     MiniMaxH3PipelineConfig,
@@ -20,9 +19,63 @@ from sglang.multimodal_gen.configs.pipeline_configs.minimax_h3 import (
 from sglang.multimodal_gen.configs.pipeline_configs.minimax_h3_vdn import (
     VDNH3PipelineConfig,
 )
+from sglang.multimodal_gen.runtime.server_args.server_args import ServerArgs
 
 ROOT = pathlib.Path(os.environ["H3_BENCH_WORKSPACE"]).resolve()
 SUITE = pathlib.Path(os.environ["H3_BENCH_SUITE"]).resolve()
+# None leaves the field to ServerArgs auto-resolution; the effective value is saved.
+PARALLEL_FIELDS = [
+    "num_gpus",
+    "tp_size",
+    "sp_degree",
+    "ulysses_degree",
+    "ring_degree",
+    "kv_gather_degree",
+    "dp_size",
+    "cfg_parallel_degree",
+]
+
+
+def _bool(text):
+    if text not in ("true", "false"):
+        raise argparse.ArgumentTypeError("expected true or false")
+    return text == "true"
+
+
+def _add_server_arg_flags(parser):
+    for name in PARALLEL_FIELDS:
+        parser.add_argument("--" + name.replace("_", "-"), type=int)
+    parser.add_argument("--enable-cfg-parallel", type=_bool)
+    parser.add_argument("--dit-layerwise-offload", type=_bool, default=True)
+    parser.add_argument("--text-encoder-cpu-offload", type=_bool, default=True)
+    parser.add_argument("--vae-cpu-offload", type=_bool, default=True)
+    parser.add_argument(
+        "--server-args-json",
+        default="{}",
+        help="Extra ServerArgs fields; unknown names are rejected.",
+    )
+
+
+def _server_arg_overrides(args):
+    overrides = {
+        name: getattr(args, name)
+        for name in PARALLEL_FIELDS
+        if getattr(args, name) is not None
+    }
+    if args.enable_cfg_parallel is not None:
+        overrides["enable_cfg_parallel"] = args.enable_cfg_parallel
+    overrides.update(
+        dit_layerwise_offload=args.dit_layerwise_offload,
+        text_encoder_cpu_offload=args.text_encoder_cpu_offload,
+        vae_cpu_offload=args.vae_cpu_offload,
+    )
+    extra = json.loads(args.server_args_json)
+    known = {f.name for f in dataclasses.fields(ServerArgs)}
+    unknown = sorted(set(extra) - known)
+    if unknown:
+        raise ValueError(f"Unknown ServerArgs fields in --server-args-json: {unknown}")
+    overrides.update(extra)
+    return overrides
 
 
 def main():
@@ -36,6 +89,18 @@ def main():
     parser.add_argument("--resident", type=int, default=0)
     parser.add_argument("--quantization")
     parser.add_argument("--changed-prompt", action="store_true")
+    parser.add_argument(
+        "--text-encoder",
+        default="qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        help="File name under ComfyUI/models/text_encoders.",
+    )
+    parser.add_argument(
+        "--reference-image",
+        default="h3_validation_reference.png",
+        help="File name under ComfyUI/input for ref2av.",
+    )
+    parser.add_argument("--torch-threads", type=int, default=8)
+    _add_server_arg_flags(parser)
     args = parser.parse_args()
     if args.profile:
         os.environ["SGLANG_DIFFUSION_STAGE_LOGGING"] = "1"
@@ -44,7 +109,7 @@ def main():
     out.mkdir(parents=True, exist_ok=False)
     if args.profile:
         os.environ["SGLANG_PERF_LOG_DIR"] = str(out)
-    torch.set_num_threads(8)
+    torch.set_num_threads(args.torch_threads)
     source_names = [
         "runtime/layers/quantization/kitchen_int8.py",
         "runtime/layers/attention/backends/sage_attn.py",
@@ -72,12 +137,14 @@ def main():
                 "SGLANG_DIFFUSION_SYNC_STAGE_PROFILING",
                 "SGLANG_KITCHEN_INT8_MAX_ROWS",
                 "SGLANG_KITCHEN_INT8_MIN_SPLIT_N",
+                "CUDA_VISIBLE_DEVICES",
             ]
         },
+        "cli": vars(args),
     }
+    gpu = GpuMonitor()
+    provenance["gpus"] = gpu.identity
     (out / "execution-environment.json").write_text(json.dumps(provenance, indent=2))
-    pynvml.nvmlInit()
-    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
     vdn = args.case == "vdn"
     ref = args.case == "ref2av"
     variant = "Ref2VA" if ref else "FL2VA"
@@ -104,8 +171,7 @@ def main():
         },
         component_weights_paths={
             "text_encoder": str(
-                ROOT
-                / "ComfyUI/models/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+                ROOT / "ComfyUI/models/text_encoders" / args.text_encoder
             ),
             "video_vae": str(
                 ROOT / "ComfyUI/models/vae/minimax_h3_video_vae_fp16.safetensors"
@@ -114,12 +180,8 @@ def main():
                 ROOT / "ComfyUI/models/vae/minimax_h3_audio_vae_fp32.safetensors"
             ),
         },
-        num_gpus=1,
         attention_backend=args.backend,
-        dit_layerwise_offload=True,
         dit_cpu_offload=False,
-        text_encoder_cpu_offload=True,
-        vae_cpu_offload=True,
         enable_torch_compile=False,
         warmup_mode="off",
     )
@@ -149,6 +211,7 @@ def main():
         )
     if args.quantization is not None:
         options["quantization"] = args.quantization
+    options.update(_server_arg_overrides(args))
     prompt = (
         "Use <Picture 1> as the cat reference. The orange cat walks on a sunny beach. Audio: quiet ocean waves and soft piano, no speech."
         if ref
@@ -164,7 +227,7 @@ def main():
                 {
                     "type": "image",
                     "uri": "file://"
-                    + str(ROOT / "ComfyUI/input/h3_validation_reference.png"),
+                    + str(ROOT / "ComfyUI/input" / args.reference_image),
                     "role": "reference",
                 }
             ]
@@ -204,37 +267,14 @@ def main():
             req = dict(request, seed=150000 + i, output_file_name=f"run_{i:02}")
             if args.changed_prompt:
                 req["prompt"] += f" A small cloud is visible in shot number {i}."
-            samples = []
-            stop = threading.Event()
+            processes_before = gpu.processes()
             start = time.perf_counter()
-
-            def monitor():
-                while not stop.is_set():
-                    samples.append(
-                        {
-                            "seconds": time.perf_counter() - start,
-                            "used_gib": pynvml.nvmlDeviceGetMemoryInfo(handle).used
-                            / 2**30,
-                            "util": pynvml.nvmlDeviceGetUtilizationRates(handle).gpu,
-                            "sm_mhz": pynvml.nvmlDeviceGetClockInfo(
-                                handle, pynvml.NVML_CLOCK_SM
-                            ),
-                            "temperature_c": pynvml.nvmlDeviceGetTemperature(
-                                handle, pynvml.NVML_TEMPERATURE_GPU
-                            ),
-                            "power_w": pynvml.nvmlDeviceGetPowerUsage(handle) / 1000,
-                        }
-                    )
-                    stop.wait(0.25)
-
-            thread = threading.Thread(target=monitor, daemon=True)
-            thread.start()
+            samples, finish_samples = gpu.start(start)
             try:
                 result = gen.generate(req)
                 elapsed = time.perf_counter() - start
             finally:
-                stop.set()
-                thread.join(timeout=2)
+                finish_samples()
             (out / f"gpu-samples-{i:02}.json").write_text(json.dumps(samples, indent=2))
             if result is None or isinstance(result, list):
                 raise RuntimeError(f"Unexpected result {result}")
@@ -275,7 +315,8 @@ def main():
                 "size": result.size,
                 "metrics": result.metrics,
                 "peak_memory_mb": result.peak_memory_mb,
-                "peak_gpu_gib": max(x["used_gib"] for x in samples),
+                **GpuMonitor.peaks(samples),
+                "gpu_processes_before": processes_before,
                 "media": streams,
                 "output_bytes": media.stat().st_size,
             }
@@ -299,7 +340,7 @@ def main():
     finally:
         if gen is not None:
             gen.shutdown()
-        pynvml.nvmlShutdown()
+        gpu.shutdown()
 
 
 if __name__ == "__main__":
