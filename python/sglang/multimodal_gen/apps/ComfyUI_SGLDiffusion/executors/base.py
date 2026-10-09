@@ -2,6 +2,7 @@
 Base executor class for SGLang Diffusion ComfyUI integration.
 """
 
+import os
 import uuid
 
 import torch
@@ -15,16 +16,54 @@ except ImportError:
     )
 
 
+# Arbitrary; allocator slack and transient copies while the worker loads LoRA.
+_LORA_VRAM_HEADROOM = 2 * 1024**3
+
+
+def release_comfy_vram(nbytes: int) -> None:
+    """Evict ComfyUI-held models until ``nbytes`` of device memory are free.
+
+    The SGLD worker allocates outside ComfyUI's accounting, so ComfyUI does
+    not evict, e.g., a text encoder loaded earlier in the graph on its behalf.
+    Evicted models are reloaded on demand.
+    """
+    try:
+        from comfy import model_management
+    except ImportError:
+        return
+    device = model_management.get_torch_device()
+    model_management.free_memory(nbytes, device)
+    model_management.soft_empty_cache()
+
+
+def _lora_bytes(lora_path) -> int:
+    paths = lora_path if isinstance(lora_path, (list, tuple)) else [lora_path]
+    total = 0
+    for path in paths:
+        try:
+            total += os.path.getsize(path)
+        except (OSError, TypeError):
+            pass
+    return total
+
+
 class SGLDiffusionExecutor(torch.nn.Module):
     """Shared ComfyUI DiT-forward executor. Per-model logic lives on the adapter."""
 
     adapter_cls = None
+    # LoRA merge mode for set_lora; None keeps the server default.
+    lora_merge_mode: str | None = None
 
     def __init__(self, generator, model_path, model, config):
         super(SGLDiffusionExecutor, self).__init__()
         self.generator = generator
         self.model_path = model_path
-        self.model = model
+        # Not a registered submodule: the ComfyUI model owns this executor as
+        # its diffusion_model, and a module cycle breaks state_dict() / _apply().
+        object.__setattr__(self, "model", model)
+        # DiT parameter names from the checkpoint header, so ComfyUI's LoRA key
+        # mapping sees the served model (see state_dict below).
+        self.dit_state_keys = tuple(getattr(model, "sgld_dit_state_keys", ()))
         self.dtype = config.unet_config["dtype"]
         self.config = config
         self.loras = []
@@ -37,6 +76,19 @@ class SGLDiffusionExecutor(torch.nn.Module):
         self.session_id = uuid.uuid4().hex
         self._run_id = 0
         self._sent_conds: set[tuple] = set()
+
+    def state_dict(self, *args, destination=None, prefix="", keep_vars=False):
+        """Header-only view of the served DiT: names with empty placeholders.
+
+        The weights live in the SGLD worker. ComfyUI builds LoRA key maps from
+        ``model.state_dict()``; exposing the names lets SGLDModelPatcher reject
+        a native LoRA that targets this DiT instead of dropping it silently.
+        """
+        if destination is None:
+            destination = {}
+        for key in self.dit_state_keys:
+            destination[prefix + key] = torch.empty(0)
+        return destination
 
     @staticmethod
     def should_suppress_logs(timestep):
@@ -55,11 +107,14 @@ class SGLDiffusionExecutor(torch.nn.Module):
             "target": target,
         }
         if lora_nickname and len(lora_nickname) > 0:
+            # Adapter tensors are placed on the worker's device.
+            release_comfy_vram(2 * _lora_bytes(lora_path) + _LORA_VRAM_HEADROOM)
             self.generator.set_lora(
                 lora_nickname=lora_nickname,
                 lora_path=lora_path,
                 strength=strength,
                 target=target,
+                merge_mode=self.lora_merge_mode,
             )
 
         self._lora_input = desired

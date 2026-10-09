@@ -414,6 +414,7 @@ class SGLDiffusionGenerator:
         model_config.custom_operations = model_options.get("custom_operations", None)
         model_config.unet_config["disable_unet_model_creation"] = True
         comfyui_model = model_config.get_model({})
+        comfyui_model.sgld_dit_state_keys = tuple(new_sd.keys())
         return comfyui_model, model_config, model_type
 
     def load_model(

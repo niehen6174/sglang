@@ -61,3 +61,43 @@ def test_chained_lora_nodes_keep_every_lora() -> None:
     ]
     assert "style" not in base.patches  # the upstream model is not mutated
     assert set(second.patches) == {"style", "detail"}
+
+
+def test_sgld_model_rejects_native_lora_on_the_served_dit():
+    import pytest
+
+    pytest.importorskip("comfy.model_patcher")
+    from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.core.model_patcher import (
+        SGLDModelPatcher,
+    )
+
+    patcher = object.__new__(SGLDModelPatcher)
+    # A text-encoder LoRA through LoraLoader(model, clip) touches no DiT key.
+    assert SGLDModelPatcher.add_patches(patcher, {"clip_l.layer.weight": ()}, 1.0) == []
+    with pytest.raises(RuntimeError, match="SGLDLoraLoader"):
+        SGLDModelPatcher.add_patches(
+            patcher, {("diffusion_model.proj_out.weight", None): ()}, 0.5
+        )
+
+
+def test_executor_state_dict_lists_dit_keys_without_recursing():
+    import torch
+
+    from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.executors.base import (
+        SGLDiffusionExecutor,
+    )
+
+    executor = SGLDiffusionExecutor.__new__(SGLDiffusionExecutor)
+    torch.nn.Module.__init__(executor)
+    executor.dit_state_keys = (
+        "proj_out.weight",
+        "transformer_blocks.0.ff.net.2.weight",
+    )
+    comfy_model = torch.nn.Module()
+    comfy_model.diffusion_model = executor
+    # The executor points back at the ComfyUI model without registering it.
+    object.__setattr__(executor, "model", comfy_model)
+    assert sorted(comfy_model.state_dict()) == [
+        "diffusion_model.proj_out.weight",
+        "diffusion_model.transformer_blocks.0.ff.net.2.weight",
+    ]
