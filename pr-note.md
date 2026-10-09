@@ -17,3 +17,6 @@ Native BF16 batch output is not equivalent to independent B=1 output: this small
 Saved evidence, scripts, workflows and conclusions: `/scratch/data/sgld_comfy/results/comfyui-batch-20261009`. Early failed equivalence checks are preserved separately from the passing functional checks; no tolerance was relaxed.
 
 Full native batch requires no additional #43163 patch on this branch: its per-row behavior is already incorporated. The branch includes the earlier multi-LoRA commits; review only commits after `a443903da6` for this change.
+
+## H200 follow-up (2026-10-09)
+Reviewed on 2x H200 with H3 INT8 through ComfyUI `/prompt` (same seed, latent SHA-256): base, A, A+B (INT8 dynamic, previously rejected), cached A after A+B, all removed and strength 0 match their references exactly; B alone differs from A and A+B. H3 batch > 1 was not covered by the per-row path (the AV latent is one NestedTensor) and failed in the worker with an index_copy_ shape error, masked as "noise_pred NoneType". Two follow-up commits: reject batched H3 latents with ComfyUI's message (the checkpoint is CFG-distilled), and raise the worker error before unpacking. 560 unit tests passed; on GPU, B=2 now fails immediately with the clear message and B=1 latents are unchanged.
