@@ -3,6 +3,7 @@ Generator for SGLang Diffusion ComfyUI integration.
 """
 
 import atexit
+import contextlib
 import logging
 import os
 
@@ -28,6 +29,40 @@ class _HeaderTensor:
         return n
 
     nelement = numel
+
+
+def _is_comfy_package_dir(path: str) -> bool:
+    return os.path.basename(os.path.normpath(path)) == "comfy" and os.path.isfile(
+        os.path.join(path, "model_management.py")
+    )
+
+
+@contextlib.contextmanager
+def _isolated_worker_spawn():
+    """Spawn SGLD workers without re-running ComfyUI's ``main.py``.
+
+    ComfyUI starts as ``python main.py`` and prepends ``ComfyUI/comfy`` to
+    sys.path; its ``utils.py`` then shadows ComfyUI's ``utils`` package and
+    the spawn child dies importing ``main.py``. The worker needs nothing
+    from ComfyUI's ``__main__``.
+    """
+    import multiprocessing.spawn as mp_spawn
+
+    original = mp_spawn.get_preparation_data
+
+    def prepare(name):
+        data = original(name)
+        data.pop("init_main_from_path", None)
+        data["sys_path"] = [
+            p for p in data.get("sys_path", []) if not _is_comfy_package_dir(p)
+        ]
+        return data
+
+    mp_spawn.get_preparation_data = prepare
+    try:
+        yield
+    finally:
+        mp_spawn.get_preparation_data = original
 
 
 def _looks_like_gguf(path: str) -> bool:
@@ -195,11 +230,12 @@ class SGLDiffusionGenerator:
         # reloads the DiT from CPU.
         kwargs.setdefault("dit_cpu_offload", False)
         kwargs = self._server_args_kwargs(kwargs)
-        self.generator = DiffGenerator.from_pretrained(
-            model_path=model_path,
-            pipeline_class_name=pipeline_class_name,
-            **kwargs,
-        )
+        with _isolated_worker_spawn():
+            self.generator = DiffGenerator.from_pretrained(
+                model_path=model_path,
+                pipeline_class_name=pipeline_class_name,
+                **kwargs,
+            )
         return self.generator
 
     @staticmethod

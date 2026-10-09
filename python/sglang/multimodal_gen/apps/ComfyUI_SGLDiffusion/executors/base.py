@@ -42,7 +42,8 @@ class SGLDiffusionExecutor(torch.nn.Module):
     def should_suppress_logs(timestep):
         """Determine if logs should be suppressed based on timestep value."""
         if torch.is_tensor(timestep):
-            return bool((timestep < 1.0).item())
+            # ComfyUI batches cond/uncond rows, so the timestep can be [B].
+            return bool((timestep.reshape(-1)[0] < 1.0).item())
         return bool(timestep < 1.0)
 
     def set_lora(self, lora_nickname=None, lora_path=None, strength=None, target=None):
