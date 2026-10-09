@@ -26,8 +26,9 @@ The plugin supports two modes of operation: **Server Mode** (via HTTP API) and *
 - **Qwen-Image**: Multi-modal image generation models (e.g., `Qwen-Image`,`Qwen-Image-2512`). *Note: Image editing support is currently experimental and may have some issues.*
 - **MiniMax-H3**: Joint video-and-audio DiT (`model_type=minimax_h3`). Integrated mode: T2V / I2VA / FL2VA use an `fl2va` checkpoint; R2V needs `ref2va`. CLIP and VAE stay in ComfyUI. Server mode uses `SGLDiffusion Generate MiniMax-H3`.
 
-Wan integrated mode supports **Wan 2.1 T2V 1.3B / 14B** and **Wan 2.2 TI2V 5B**
-(T2V and image-conditioned sampling). Use `model_type=auto-detect` or `wan2.1`
+Wan integrated mode supports **Wan 2.1 T2V 1.3B / 14B**, **Wan 2.2 TI2V 5B**,
+and **Wan 2.2 T2V 14B**
+(image-conditioned sampling is validated for the 5B model). Use `model_type=auto-detect` or `wan2.1`
 for both versions. Checkpoints use the original Wan tensor names, optionally
 prefixed with `model.diffusion_model.`. ComfyUI owns UMT5 encoding, video latents,
 frame masks, sampling and VAE decoding. The worker uses ComfyUI's selected DiT
@@ -46,7 +47,24 @@ prefetched layer and no resident Transformer layers, with approximately
 Warm 33-frame requests took approximately 181 seconds versus
 182 seconds for native ComfyUI's automatic VRAM policy;
 these single-request observations do not establish a general speedup.
-Wan 2.2 14B high/low-noise workflows remain unvalidated.
+Wan 2.2 14B T2V is covered separately below; 14B I2V remains unvalidated.
+
+`wan22_14b_t2v_layerwise_sgld_api.json` runs Wan 2.2 14B T2V with
+FP16 high-noise and low-noise checkpoints and explicit layerwise offload.
+It flattens the normal (non-turbo) branch of the official
+[Wan 2.2 14B T2V template](https://github.com/Comfy-Org/workflow_templates/blob/8be1f8c4b5af2d550d70922a23b79cee599e1f3e/templates/video_wan2_2_14B_t2v.json):
+640×640, 81 frames, Euler/simple, 20 steps split at step 10, CFG 3.5,
+shift 5 and 16 FPS. The template's FP8 scaled checkpoints are substituted
+with FP16; FP8 scaled and the turbo/LoRA branch are not validated here.
+A complete API request passed with finite intermediate/final latents,
+VAE decode and MP4 saving, taking 518 seconds and peaking at
+16.18 GiB of total GPU usage on an RTX 5090 32 GB.
+Two smaller 20-step requests also passed, including a changed seed to
+force recomputation with cached MODEL objects. The shared runtime has one
+active worker: switching experts rebuilds the worker, including on repeated
+requests. This supports execution but does not provide persistent dual-expert
+caching or establish a speedup. Native comparisons are not pixel-identical.
+Wan 2.2 14B I2V is outside this validated scope.
 
 Wan batches, including CFG batches, currently run one row per worker request.
 `enable_native_batch` does not enable packed Wan batching. Wan 2.1 I2V, VACE,
@@ -112,6 +130,7 @@ Reference workflow files are provided in the `workflows/` directory:
 - **`wan21_t2v_sgld_api.json`**: Wan 2.1 1.3B text-to-video.
 - **`wan21_14b_layerwise_sgld_api.json`**: Wan 2.1 14B text-to-video with explicit layerwise offload.
 - **`wan22_t2v_sgld_api.json`**: Wan 2.2 5B text-to-video.
+- **`wan22_14b_t2v_layerwise_sgld_api.json`**: Wan 2.2 14B FP16 dual-expert T2V with layerwise offload.
 - **`wan22_i2v_sgld_api.json`**: Wan 2.2 5B image-to-video; replace the `EmptyImage` input with your image.
 
 - **`sgld_text2img.json`**: Server-mode text-to-image generation with LoRA support.

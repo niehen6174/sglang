@@ -1,8 +1,8 @@
-# Add Wan 2.1 1.3B and Wan 2.2 5B to ComfyUI integrated mode
+# Add Wan 2.1 and Wan 2.2 to ComfyUI integrated mode
 
 SGLang already implements Wan, but SGLDUNETLoader rejected ComfyUI Wan
-checkpoints. This change supports Wan 2.1 T2V 1.3B / 14B and Wan 2.2 TI2V 5B
-(text-to-video and image-conditioned sampling). ComfyUI retains UMT5, video
+checkpoints. This change supports Wan 2.1 T2V 1.3B / 14B, Wan 2.2 TI2V 5B
+(text-to-video and image-conditioned sampling), and Wan 2.2 T2V 14B. ComfyUI retains UMT5, video
 latent preparation, frame masking, sampling and VAE decoding; the existing
 WanPipeline runs the DiT forward only.
 
@@ -93,6 +93,37 @@ validated by this extension.
 Evidence: /scratch/data/sgld_comfy/results/comfyui-wan14b-offload-20261009/
 (CONCLUSIONS.txt, manifest.json, validation.json, runs, media and tools).
 
+## Wan 2.2 T2V 14B dual-expert validation
+
+The existing checkpoint bridge loaded both official FP16 experts strictly
+(14.29B parameters / 40 layers each) without further runtime fixes. Six
+ComfyUI API requests passed: four SGLD requests (small diagnostic, two
+512×320/33-frame/20-step requests, and 640×640/81-frame/20-step) plus
+native small and medium references. Intermediate high-noise and final
+low-noise latents were finite; complete MP4 dimensions/frame counts were
+checked. Logs verify each SGLD request loaded both distinct expert files
+with layerwise offload. Changed-seed repeat sampling used cached MODEL
+objects and correctly switched back from low to high noise.
+
+The example flattens the official normal-mode template at revision
+`8be1f8c4b5af2d550d70922a23b79cee599e1f3e`: 20 Euler/simple steps split at
+10, CFG 3.5, shift 5, 16 FPS, original prompts and published seed.
+FP8 scaled defaults are replaced by FP16. Full geometry request:
+517.98s / 16.18 GiB peak total NVML GPU usage.
+Medium native/SGLD: 49.80s / 160.26s;
+31.58 / 11.90 GiB peak.
+These are single requests with different residency policies, not controlled
+speedup benchmarks. The one active shared worker rebuilds on expert switches;
+repeated requests still reload both experts. Non-sampling time for the two
+medium SGLD requests was approximately 120s each. Persistent dual-expert
+caching is not implemented. FP8 scaled, 14B I2V and few-step LoRA paths
+remain unvalidated. Generic Wan sampling resolution warnings are retained;
+they do not alter the ComfyUI-supplied geometry. Numerical comparisons
+are preserved without a pixel-equivalence claim.
+
+Evidence: /scratch/data/sgld_comfy/results/comfyui-wan22-14b-offload-20261009/
+(CONCLUSIONS.txt, validation.json, switch-timing.json, runs, media, tools).
+
 ## Scope and dependency
 
 Branch: codex/feat-comfyui-wan. Base: codex/fix-comfyui-native-batch at
@@ -101,5 +132,5 @@ and batch fixes; this note describes only the new Wan changes.
 
 Wan native packed batching, multi-GPU, compile, sparse attention and
 quantization were not validated. Wan 2.1 I2V, VACE, Animate, camera/control,
-and Wan 2.2 14B high/low-noise workflows are outside this change's scope.
+and Wan 2.2 14B I2V workflows are outside this change's scope.
 Models, media and machine-local result files are not part of the commit.
