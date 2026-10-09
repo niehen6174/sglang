@@ -213,3 +213,34 @@ def test_options_preserves_native_batch_setting(enabled):
     exec(compile(ast.Module(body=[cls], type_ignores=[]), str(path), "exec"), namespace)
     options = namespace["SGLDOptions"]().create_options(enable_native_batch=enabled)[0]
     assert options["comfyui_native_batch"] is enabled
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"patches_replace": {"dit": {("double_block", 3): object()}}},
+        {"patches": {"attn1_patch": [object()]}},
+        {"optimized_attention_override": object()},
+    ],
+)
+def test_comfy_model_patches_are_rejected_not_dropped(options):
+    """ComfyUI model patches (H3 Fun ControlNet block replace, attention
+    backend override) never reach the SGLD worker; they used to be ignored
+    and produce bit-identical output to the unpatched model."""
+    ex = RecordingExecutor(FluxAdapter())
+    x, t, context = (
+        torch.randn(1, 16, 8, 8),
+        torch.full((1,), 0.5),
+        torch.randn(1, 7, 32),
+    )
+    with pytest.raises(ValueError, match="cannot apply ComfyUI model patches"):
+        ex(x, t, context, y=torch.randn(1, 768), transformer_options=options)
+    assert ex.sent == []
+    ex(
+        x,
+        t,
+        context,
+        y=torch.randn(1, 768),
+        transformer_options={"patches": {}, "patches_replace": {"dit": {}}},
+    )
+    assert len(ex.sent) == 1
