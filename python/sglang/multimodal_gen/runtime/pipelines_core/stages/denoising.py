@@ -352,6 +352,13 @@ class DualTransformerExecutionMode(str, Enum):
     PAIRED_PER_STEP = "paired_per_step"
 
 
+# Without shared layers, skip-softmax only works when the server backend is FA.
+_SKIP_SOFTMAX_REQUEST = (
+    "skip_softmax_params (runs self-attention on fa; start the server with "
+    "attention_backend=fa if the model has no switchable layers)"
+)
+
+
 class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
     """
     Stage for running the denoising loop in diffusion pipelines.
@@ -688,11 +695,15 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
             ]
             if self_attention_layers:
                 stage_backend = self._validate_attention_backend_override(
-                    AttentionBackendEnum.FA, self_attention_layers
+                    AttentionBackendEnum.FA,
+                    self_attention_layers,
+                    requested_by=_SKIP_SOFTMAX_REQUEST,
                 )
             elif layers or self.attn_backend.get_enum() is not AttentionBackendEnum.FA:
                 self._validate_attention_backend_override(
-                    AttentionBackendEnum.FA, self_attention_layers
+                    AttentionBackendEnum.FA,
+                    self_attention_layers,
+                    requested_by=_SKIP_SOFTMAX_REQUEST,
                 )
             layer_targets = [
                 (
@@ -748,7 +759,11 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
         ]
 
     def _validate_attention_backend_override(
-        self, target: AttentionBackendEnum, layers: list[nn.Module]
+        self,
+        target: AttentionBackendEnum,
+        layers: list[nn.Module],
+        *,
+        requested_by: str | None = None,
     ) -> type:
         """Reject incompatible server settings; returns the resolved backend cls."""
         args = self.server_args
@@ -791,7 +806,12 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
                 )
         if reasons:
             message = (
-                f"Rejecting attention_backend_override={target.name.lower()!r}: "
+                "Rejecting "
+                + (
+                    requested_by
+                    or f"attention_backend_override={target.name.lower()!r}"
+                )
+                + ": "
                 + "; ".join(reasons)
                 + "."
             )
