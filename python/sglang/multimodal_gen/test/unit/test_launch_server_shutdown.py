@@ -81,3 +81,41 @@ class TestLaunchServerShutdown(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSchedulerInitFailure(unittest.TestCase):
+    def test_init_error_reaches_launcher_through_ready_pipe(self):
+        """A rank failing in Scheduler.__init__ used to close its pipe silently,
+        so the launcher raised a bare EOFError without the reason."""
+        import multiprocessing as mp
+
+        from sglang.multimodal_gen.runtime.managers import gpu_worker
+
+        platform = Mock()
+        platform.is_cuda.return_value = False
+        platform.is_musa.return_value = False
+        reader, writer = mp.Pipe(duplex=False)
+        with (
+            patch.object(gpu_worker, "current_platform", platform),
+            patch.object(gpu_worker, "initialize_current_platform"),
+            patch.object(gpu_worker, "kill_itself_when_parent_died"),
+            patch.object(gpu_worker, "configure_logger"),
+            patch.object(gpu_worker, "globally_suppress_loggers"),
+            patch.object(gpu_worker, "init_diffusion_tracing"),
+            patch.object(gpu_worker, "_device_initialized", return_value=False),
+            patch.object(gpu_worker.PortArgs, "from_server_args"),
+            patch(
+                "sglang.multimodal_gen.runtime.managers.scheduler.Scheduler",
+                side_effect=ValueError("unsupported checkpoint"),
+            ),
+            self.assertRaisesRegex(ValueError, "unsupported checkpoint"),
+        ):
+            gpu_worker.run_scheduler_process(
+                local_rank=0, rank=0, server_args=Mock(), pipe_writer=writer
+            )
+        writer.close()
+        self.assertTrue(reader.poll(1))
+        self.assertEqual(
+            reader.recv(),
+            {"status": "error", "error": "ValueError: unsupported checkpoint"},
+        )

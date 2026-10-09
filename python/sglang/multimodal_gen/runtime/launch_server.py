@@ -205,7 +205,8 @@ def launch_server(server_args: ServerArgs, launch_http_server: bool = True):
 
         if data["status"] != "ready":
             raise RuntimeError(
-                "Initialization failed. Please see the error messages above."
+                f"Rank {rank_offset + i} scheduler failed to initialize: "
+                f"{data.get('error', 'see the error messages above')}"
             )
         scheduler_infos.append(data)
         reader.close()
