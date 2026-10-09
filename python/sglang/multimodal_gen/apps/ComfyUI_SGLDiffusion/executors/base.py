@@ -37,6 +37,20 @@ def _hash_value(digest, value) -> None:
         digest.update(text)
 
 
+def _row(value, index: int, batch: int):
+    if torch.is_tensor(value) and value.ndim > 0 and value.shape[0] == batch:
+        return value[index : index + 1]
+    if type(value) in (list, tuple):
+        return type(value)(_row(item, index, batch) for item in value)
+    return value
+
+
+def _uniform(value):
+    if not torch.is_tensor(value) or value.numel() <= 1:
+        return True
+    return bool((value == value.reshape(-1)[0]).all().item())
+
+
 class SGLDiffusionExecutor(torch.nn.Module):
     """Shared ComfyUI DiT-forward executor. Per-model logic lives on the adapter."""
 
@@ -64,7 +78,7 @@ class SGLDiffusionExecutor(torch.nn.Module):
     def should_suppress_logs(timestep):
         """Determine if logs should be suppressed based on timestep value."""
         if torch.is_tensor(timestep):
-            return bool((timestep < 1.0).item())
+            return bool((timestep < 1.0).all().item())
         return bool(timestep < 1.0)
 
     def set_lora(self, lora_nickname=None, lora_path=None, strength=None, target=None):
@@ -149,6 +163,11 @@ class SGLDiffusionExecutor(torch.nn.Module):
     def _sampling_params_kwargs(self, packed, timestep) -> dict:
         return {
             "prompt": " ",
+            "num_outputs_per_prompt": (
+                int(packed.latents.shape[0])
+                if self.adapter.supports_batched_forward
+                else 1
+            ),
             "guidance_scale": packed.guidance_scale,
             "height": packed.height,
             "width": packed.width,
@@ -180,12 +199,36 @@ class SGLDiffusionExecutor(torch.nn.Module):
             if value is not None:
                 extra[key] = value
         req.extra = extra
-        req.generator = [
-            torch.Generator("cuda") for _ in range(req.num_outputs_per_prompt)
-        ]
+        req.generator = [torch.Generator("cuda") for _ in range(req.batch_size)]
         output_batch = self.generator._send_to_scheduler_and_wait_for_response([req])
         return self.adapter.unpack(output_batch.noise_pred, packed, x)
 
     def forward(self, x, timestep, context, **kwargs):
+        batch = int(x.shape[0]) if torch.is_tensor(x) else 1
+        if batch > 1:
+            if (
+                self.adapter.supports_batched_forward
+                and self.generator.server_args.comfyui_native_batch
+                and _uniform(timestep)
+                and _uniform(kwargs.get("guidance"))
+            ):
+                packed = self.adapter.pack(x, timestep, context, **kwargs)
+                # The worker expects a schedule, not one timestep per sample.
+                packed.timesteps = packed.timesteps.reshape(-1)[:1]
+                return self._execute_packed(packed, x, timestep)
+            return torch.cat(
+                [
+                    self._forward_one(
+                        _row(x, i, batch),
+                        _row(timestep, i, batch),
+                        _row(context, i, batch),
+                        **{key: _row(value, i, batch) for key, value in kwargs.items()},
+                    )
+                    for i in range(batch)
+                ]
+            )
+        return self._forward_one(x, timestep, context, **kwargs)
+
+    def _forward_one(self, x, timestep, context, **kwargs):
         packed = self.adapter.pack(x, timestep, context, **kwargs)
         return self._execute_packed(packed, x, timestep)

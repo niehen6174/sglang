@@ -9,6 +9,7 @@ from .base import SGLDiffusionExecutor
 class QwenImageAdapter(ComfyUIModelAdapter):
     model_types = ("qwen_image",)
     pipeline_class_name = "QwenImagePipeline"
+    supports_batched_forward = True
     patch_size = 2
 
     def pack(self, x, timestep, context, **kwargs) -> PackedForward:
@@ -18,7 +19,7 @@ class QwenImageAdapter(ComfyUIModelAdapter):
             latents=latents,
             timesteps=timestep * 1000.0,
             prompt_embeds=[context],
-            prompt_seq_lens=[[seq]],
+            prompt_seq_lens=[[seq] * int(context.shape[0])],
             height=orig_shape[-2] * 8,
             width=orig_shape[-1] * 8,
             unpack_ctx={
@@ -74,6 +75,7 @@ class QwenImageAdapter(ComfyUIModelAdapter):
 class QwenImageEditAdapter(QwenImageAdapter):
     model_types = ("qwen_image_edit",)
     pipeline_class_name = "QwenImageEditPlusPipeline"
+    supports_batched_forward = False
 
     def pack(
         self,

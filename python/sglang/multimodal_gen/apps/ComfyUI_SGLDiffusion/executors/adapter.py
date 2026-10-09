@@ -38,6 +38,7 @@ class ComfyUIModelAdapter:
 
     model_types: tuple[str, ...] = ()
     pipeline_class_name: str = ""
+    supports_batched_forward: bool = False
     # extra_req fields the worker caches per cond. Dropped on a cache hit and
     # hashed into the cond key, so the two lists cannot drift apart.
     cached_extra_keys: tuple[str, ...] = ("image_latent",)

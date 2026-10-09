@@ -473,6 +473,7 @@ class ServerArgs(DisaggServerArgsMixin):
 
     # ComfyUI integration
     comfyui_mode: bool = False
+    comfyui_native_batch: bool = False
 
     # Compilation
     enable_torch_compile: bool = False

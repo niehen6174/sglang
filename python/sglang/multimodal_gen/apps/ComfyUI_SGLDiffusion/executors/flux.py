@@ -17,6 +17,7 @@ def _flux_guidance_scale(guidance) -> float:
 class FluxAdapter(ComfyUIModelAdapter):
     model_types = ("flux",)
     pipeline_class_name = "FluxPipeline"
+    supports_batched_forward = True
 
     def pack(
         self, x, timestep, context, y=None, guidance=None, **kwargs
@@ -28,7 +29,7 @@ class FluxAdapter(ComfyUIModelAdapter):
             latents=packed,
             timesteps=timestep * 1000.0,
             prompt_embeds=[y, context],
-            prompt_seq_lens=[[clip_batch], [t5_seq]],
+            prompt_seq_lens=[[1] * clip_batch, [t5_seq] * int(context.shape[0])],
             pooled_embeds=[y],
             height=x.shape[-2] * 8,
             width=x.shape[-1] * 8,
