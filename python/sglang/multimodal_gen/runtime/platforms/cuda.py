@@ -149,18 +149,28 @@ class _SlidingTileAttentionBackendResolver(_CudaAttentionBackendResolver):
             ) from e
 
 
+_SAGE_ATTN_INSTALL = (
+    "pip install git+https://github.com/thu-ml/SageAttention.git@"
+    "d9704247a5139ab4c03bf7fc6b35cc0e2cbb5ea4 --no-build-isolation"
+)
+
+
 class _SageAttentionBackendResolver(_CudaAttentionBackendResolver):
     backend = AttentionBackendEnum.SAGE_ATTN
 
+    # Raise instead of silently serving FA: an explicit sage_attn request that
+    # runs another kernel misreports both speed and numerics. The selector still
+    # falls back where its component policy allows (auxiliary components).
     @classmethod
-    def resolve(cls, platform) -> str | AttentionBackendEnum:
+    def resolve(cls, platform) -> str:
         try:
             from sageattention import sageattn  # noqa: F401
-        except ImportError:
-            logger.info(
-                "Sage Attention backend is not installed (To install it, run `pip install git+https://github.com/thu-ml/SageAttention.git@d9704247a5139ab4c03bf7fc6b35cc0e2cbb5ea4 --no-build-isolation`). Falling back to Flash Attention."
-            )
-            return AttentionBackendEnum.FA
+        except ImportError as e:
+            raise ValueError(
+                "attention backend sage_attn was requested but SageAttention is "
+                f"not installed; install it with `{_SAGE_ATTN_INSTALL}` or choose "
+                "another backend"
+            ) from e
 
         if platform.is_hopper():
             try:
@@ -168,41 +178,41 @@ class _SageAttentionBackendResolver(_CudaAttentionBackendResolver):
                 from sageattention.sm90_compile import (  # noqa: F401
                     qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf_fake_impl,
                 )
-            except ImportError:
-                logger.warning(
-                    "Installed Sage Attention is missing the SM90 binding fix. Falling back to Flash Attention. Reinstall with `pip install --force-reinstall git+https://github.com/thu-ml/SageAttention.git@d9704247a5139ab4c03bf7fc6b35cc0e2cbb5ea4 --no-build-isolation`."
-                )
-                return AttentionBackendEnum.FA
+            except ImportError as e:
+                raise ValueError(
+                    "attention backend sage_attn was requested but the installed "
+                    "SageAttention lacks the SM90 binding fix; reinstall with "
+                    f"`{_SAGE_ATTN_INSTALL.replace('pip install', 'pip install --force-reinstall', 1)}`"
+                ) from e
 
         try:
             from sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn import (  # noqa: F401
                 SageAttentionBackend,
             )
-
-            return "sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn.SageAttentionBackend"
-        except ImportError:
-            logger.info(
-                "Sage Attention backend failed to import. Falling back to Flash Attention."
-            )
-            return AttentionBackendEnum.FA
+        except ImportError as e:
+            raise ValueError(
+                f"attention backend sage_attn failed to import: {e}"
+            ) from e
+        return "sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn.SageAttentionBackend"
 
 
 class _SageAttention3BackendResolver(_CudaAttentionBackendResolver):
     backend = AttentionBackendEnum.SAGE_ATTN_3
 
     @classmethod
-    def resolve(cls, platform) -> str | AttentionBackendEnum:
+    def resolve(cls, platform) -> str:
         try:
             from sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn3 import (  # noqa: F401
                 SageAttention3Backend,
             )
-
-            return "sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn3.SageAttention3Backend"
-        except ImportError:
-            logger.info(
-                "Sage Attention 3 backend is not installed (To install it, see https://github.com/thu-ml/SageAttention/tree/main/sageattention3_blackwell#installation). Falling back to Torch SDPA."
-            )
-            return AttentionBackendEnum.TORCH_SDPA
+        except ImportError as e:
+            raise ValueError(
+                "attention backend sage_attn_3 was requested but SageAttention 3 "
+                "is not installed (it targets Blackwell); see https://github.com/"
+                "thu-ml/SageAttention/tree/main/sageattention3_blackwell#installation "
+                "or choose another backend"
+            ) from e
+        return "sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn3.SageAttention3Backend"
 
 
 class _SpargeAttentionBackendResolver(_CudaAttentionBackendResolver):
