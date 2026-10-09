@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import torch
 import torch.nn.functional as F
@@ -36,6 +36,32 @@ try:
     from comfy_kitchen import quantize_nvfp4, scaled_mm_nvfp4
 except ImportError:
     quantize_nvfp4 = scaled_mm_nvfp4 = None
+
+
+def _linear_nvfp4_scales_to_swizzled(scales: torch.Tensor) -> torch.Tensor:
+    """Inverse of _swizzled_nvfp4_scales_to_linear for tile-aligned [M, K] scales."""
+    rows, cols = scales.shape
+    if rows % 128 or cols % 4:
+        raise ValueError(
+            f"NVFP4 block scales {tuple(scales.shape)} are not 128x4 tile aligned; "
+            "this tensor-parallel split cannot keep the swizzled layout"
+        )
+    tiled = scales.reshape(rows // 128, 4, 32, cols // 4, 4)
+    return tiled.permute(0, 3, 2, 1, 4).contiguous().reshape(rows, cols)
+
+
+def _shard_swizzled_scales(weight_loader: Callable) -> Callable:
+    """Comfy serializes block scales swizzled in 128x4 tiles, so narrowing the
+    stored tensor along the input dim mixes blocks across rows; shard the
+    row-major view, then swizzle the shard back for apply()."""
+
+    def load(param: nn.Parameter, loaded_weight: torch.Tensor, *args, **kwargs):
+        weight_loader(
+            param, _swizzled_nvfp4_scales_to_linear(loaded_weight), *args, **kwargs
+        )
+        param.data.copy_(_linear_nvfp4_scales_to_swizzled(param.data))
+
+    return load
 
 
 def _register_parameter(
@@ -86,6 +112,9 @@ class ComfyFullPrecisionNvfp4LinearMethod(ModelOptFp4LinearMethod):
             output_size,
             params_dtype,
             **extra_weight_attrs,
+        )
+        layer.weight_scale._weight_loader = _shard_swizzled_scales(
+            layer.weight_scale.weight_loader
         )
         # Comfy uses runtime activations directly for this weight-only path.
         layer.register_parameter("input_scale", None)
