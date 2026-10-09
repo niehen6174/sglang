@@ -121,6 +121,13 @@ def _evict_other_runs(session_id: str) -> None:
                 store.pop(key, None)
 
 
+def begin_comfyui_run(req) -> None:
+    """Evict older runs of this executor for stages that skip ``bind_comfyui_session``."""
+    sid = session_id_from_req(req)
+    if sid:
+        _evict_other_runs(sid)
+
+
 def bind_comfyui_session(req):
     """Restore cached conditioning, then refresh the cache from whatever is set.
 
