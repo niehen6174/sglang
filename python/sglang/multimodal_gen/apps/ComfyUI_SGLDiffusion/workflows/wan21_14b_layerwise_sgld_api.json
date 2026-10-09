@@ -1,0 +1,139 @@
+{
+  "38": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan",
+      "device": "default"
+    }
+  },
+  "39": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "wan_2.1_vae.safetensors"
+    }
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
+      "clip": [
+        "38",
+        0
+      ]
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "a fox moving quickly in a beautiful winter scenery nature trees mountains daytime tracking camera",
+      "clip": [
+        "38",
+        0
+      ]
+    }
+  },
+  "37": {
+    "class_type": "SGLDUNETLoader",
+    "inputs": {
+      "unet_name": "wan2.1_t2v_14B_bf16.safetensors",
+      "weight_dtype": "default",
+      "sgld_options": [
+        "900",
+        0
+      ]
+    }
+  },
+  "40": {
+    "class_type": "EmptyHunyuanLatentVideo",
+    "inputs": {
+      "width": 832,
+      "height": 480,
+      "length": 33,
+      "batch_size": 1
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "3",
+        0
+      ],
+      "vae": [
+        "39",
+        0
+      ]
+    }
+  },
+  "49": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "fps": 16,
+      "images": [
+        "8",
+        0
+      ]
+    }
+  },
+  "3": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 82628696717253,
+      "steps": 30,
+      "cfg": 6,
+      "sampler_name": "uni_pc",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "48",
+        0
+      ],
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "7",
+        0
+      ],
+      "latent_image": [
+        "40",
+        0
+      ]
+    }
+  },
+  "50": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "filename_prefix": "video/wan21_14b_layerwise_sgld",
+      "format": "auto",
+      "format.codec": "auto",
+      "video": [
+        "49",
+        0
+      ]
+    }
+  },
+  "48": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+      "shift": 8,
+      "model": [
+        "37",
+        0
+      ]
+    }
+  },
+  "900": {
+    "class_type": "SGLDOptions",
+    "inputs": {
+      "model_type": "auto-detect",
+      "enable_torch_compile": false,
+      "num_gpus": 1,
+      "attention_backend": "torch_sdpa",
+      "dit_layerwise_offload": true,
+      "allow_bf16_reduced_precision_reduction": false
+    }
+  }
+}

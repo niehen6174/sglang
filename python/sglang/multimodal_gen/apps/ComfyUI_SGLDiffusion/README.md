@@ -26,12 +26,27 @@ The plugin supports two modes of operation: **Server Mode** (via HTTP API) and *
 - **Qwen-Image**: Multi-modal image generation models (e.g., `Qwen-Image`,`Qwen-Image-2512`). *Note: Image editing support is currently experimental and may have some issues.*
 - **MiniMax-H3**: Joint video-and-audio DiT (`model_type=minimax_h3`). Integrated mode: T2V / I2VA / FL2VA use an `fl2va` checkpoint; R2V needs `ref2va`. CLIP and VAE stay in ComfyUI. Server mode uses `SGLDiffusion Generate MiniMax-H3`.
 
-Wan integrated mode supports **Wan 2.1 T2V 1.3B** and **Wan 2.2 TI2V 5B**
+Wan integrated mode supports **Wan 2.1 T2V 1.3B / 14B** and **Wan 2.2 TI2V 5B**
 (T2V and image-conditioned sampling). Use `model_type=auto-detect` or `wan2.1`
 for both versions. Checkpoints use the original Wan tensor names, optionally
 prefixed with `model.diffusion_model.`. ComfyUI owns UMT5 encoding, video latents,
 frame masks, sampling and VAE decoding. The worker uses ComfyUI's selected DiT
 precision unless `component_precisions` explicitly overrides it.
+
+For Wan 2.1 T2V 14B on a 32 GB GPU, enable
+`SGLDOptions.dit_layerwise_offload`. The example
+`wan21_14b_layerwise_sgld_api.json` uses 832×480, 33 frames, 30 UniPC steps,
+CFG 6 and shift 8, with the 14B BF16 checkpoint. It completed real ComfyUI API
+sampling, VAE decoding and MP4 saving on an RTX 5090, including a second
+request with a different seed. A separate 81-frame request also passed.
+The default detected worker dtype was FP16. Layerwise offload used one
+prefetched layer and no resident Transformer layers, with approximately
+26.18 GiB of host pinned weights. Peak total GPU usage was
+13.51 GiB for 33 frames and 16.34 GiB for 81 frames.
+Warm 33-frame requests took approximately 181 seconds versus
+182 seconds for native ComfyUI's automatic VRAM policy;
+these single-request observations do not establish a general speedup.
+Wan 2.2 14B high/low-noise workflows remain unvalidated.
 
 Wan batches, including CFG batches, currently run one row per worker request.
 `enable_native_batch` does not enable packed Wan batching. Wan 2.1 I2V, VACE,
@@ -95,6 +110,7 @@ Reference workflow files are provided in the `workflows/` directory:
 - **`qwen_image_sgld.json`**: Qwen-Image generation with LoRA support. Optimized for multi-modal image tasks.
 - **`z-image_sgld.json`**: High-speed image generation using Z-Image.
 - **`wan21_t2v_sgld_api.json`**: Wan 2.1 1.3B text-to-video.
+- **`wan21_14b_layerwise_sgld_api.json`**: Wan 2.1 14B text-to-video with explicit layerwise offload.
 - **`wan22_t2v_sgld_api.json`**: Wan 2.2 5B text-to-video.
 - **`wan22_i2v_sgld_api.json`**: Wan 2.2 5B image-to-video; replace the `EmptyImage` input with your image.
 

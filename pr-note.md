@@ -1,7 +1,7 @@
 # Add Wan 2.1 1.3B and Wan 2.2 5B to ComfyUI integrated mode
 
 SGLang already implements Wan, but SGLDUNETLoader rejected ComfyUI Wan
-checkpoints. This change supports Wan 2.1 T2V 1.3B and Wan 2.2 TI2V 5B
+checkpoints. This change supports Wan 2.1 T2V 1.3B / 14B and Wan 2.2 TI2V 5B
 (text-to-video and image-conditioned sampling). ComfyUI retains UMT5, video
 latent preparation, frame masking, sampling and VAE decoding; the existing
 WanPipeline runs the DiT forward only.
@@ -66,6 +66,32 @@ example requires a user image in place of `example.png`.
 Evidence: /scratch/data/sgld_comfy/results/comfyui-wan-official-20261009/
 (templates, sources.json, manifest.json, validation.json, runs, logs,
 media, tools and CONCLUSIONS.txt).
+
+## Wan 2.1 14B layerwise offload validation
+
+The same runtime code strictly loaded the official 14B BF16 checkpoint
+(14.29B parameters, 40 layers) without further fixes. ComfyUI selected FP16
+runtime. Explicit `dit_layerwise_offload=True` configured one prefetched
+layer, no resident Transformer layers and approximately 26.18 GiB of host
+pinned weights. Six 14B API requests passed with finite latent outputs and
+complete MP4 videos: one small diagnostic, two SGLD 480p/33-frame requests,
+two native 480p/33-frame requests and one SGLD 480p/81-frame request.
+Warm requests changed seed to force recomputation. The 480p graphs derive
+from the official Wan T2V template with its 1.3B model replaced by 14B;
+81 frames is an extension, not an unchanged 14B-specific official preset.
+
+Warm 33-frame total time / peak total NVML GPU usage:
+SGLD explicit layerwise offload 180.83s / 13.51 GiB;
+native automatic VRAM policy 181.51s / 31.57 GiB.
+81-frame SGLD request 636.76s / 16.34 GiB, including a fresh load.
+These are different residency policies and single requests, not a controlled
+speedup benchmark. Same-seed 33-frame FP16 final latent RMSE was 7.02%
+relative to native (cosine 0.99754); no pixel-equivalence claim.
+The 14B API example is included. 14B LoRA and other Wan variants were not
+validated by this extension.
+
+Evidence: /scratch/data/sgld_comfy/results/comfyui-wan14b-offload-20261009/
+(CONCLUSIONS.txt, manifest.json, validation.json, runs, media and tools).
 
 ## Scope and dependency
 
