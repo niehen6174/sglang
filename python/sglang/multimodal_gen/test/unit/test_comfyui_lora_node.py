@@ -101,3 +101,29 @@ def test_executor_state_dict_lists_dit_keys_without_recursing():
         "diffusion_model.proj_out.weight",
         "diffusion_model.transformer_blocks.0.ff.net.2.weight",
     ]
+
+
+def test_evict_comfy_models_keeps_only_the_sampled_sgld_model(monkeypatch):
+    from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.executors.base import (
+        evict_comfy_models,
+    )
+
+    sgld, text_encoder = object(), object()
+    loaded = [types.SimpleNamespace(model=m) for m in (sgld, text_encoder)]
+    calls = []
+    mm = types.SimpleNamespace(
+        current_loaded_models=loaded,
+        get_torch_device=lambda: "cuda:0",
+        free_memory=lambda n, dev, keep_loaded=(): calls.append((n, keep_loaded)),
+        soft_empty_cache=lambda: None,
+    )
+    comfy = types.ModuleType("comfy")
+    comfy.model_management = mm
+    monkeypatch.setitem(sys.modules, "comfy", comfy)
+    monkeypatch.setitem(sys.modules, "comfy.model_management", mm)
+
+    evict_comfy_models(keep=sgld)
+    ((required, keep),) = calls
+    # Ask for more than any device has, so every other model unloads fully.
+    assert required >= 1e30
+    assert [entry.model for entry in keep] == [sgld]

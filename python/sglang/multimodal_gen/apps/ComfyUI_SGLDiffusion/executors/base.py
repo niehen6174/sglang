@@ -36,6 +36,29 @@ def release_comfy_vram(nbytes: int) -> None:
     model_management.soft_empty_cache()
 
 
+def evict_comfy_models(keep=None) -> None:
+    """Unload every ComfyUI-held model on the device except ``keep``.
+
+    ``free_memory(n)`` only partially unloads until ComfyUI sees ``n`` bytes
+    free, and the worker's activations are invisible to that accounting, so a
+    text encoder left resident earlier in the graph starves the worker.
+    Evicted models reload on demand.
+    """
+    try:
+        from comfy import model_management
+    except ImportError:
+        return
+    keep_loaded = [
+        loaded
+        for loaded in model_management.current_loaded_models
+        if keep is not None and loaded.model is keep
+    ]
+    model_management.free_memory(
+        1e30, model_management.get_torch_device(), keep_loaded=keep_loaded
+    )
+    model_management.soft_empty_cache()
+
+
 def _lora_bytes(lora_path) -> int:
     paths = lora_path if isinstance(lora_path, (list, tuple)) else [lora_path]
     total = 0
@@ -131,6 +154,8 @@ class SGLDiffusionExecutor(torch.nn.Module):
         if self._ensure_runtime is not None:
             self._ensure_runtime(self)
         model_wrap = args[0] if args else kwargs["model_wrap"]
+        # The worker samples next; ComfyUI models reload when the graph needs them.
+        evict_comfy_models(keep=model_wrap.model_patcher)
         desired = model_wrap.model_patcher.model_options.get("sgld_lora_input")
         if desired != self._lora_input:
             if self._lora_input is not None:
