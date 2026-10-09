@@ -625,7 +625,12 @@ def get_model_info(
         try:
             config = maybe_download_model_index(model_path)
         except Exception as e:
-            logger.error(f"Could not read model config for '{model_path}': {e}")
+            # A single-file checkpoint (e.g. a ComfyUI DiT) never has a
+            # model_index.json; the fallback still resolves its configs by path.
+            single_file = os.path.isfile(model_path)
+            (logger.debug if single_file else logger.error)(
+                f"Could not read model config for '{model_path}': {e}"
+            )
             if backend == Backend.AUTO:
                 logger.info("Falling back to diffusers backend")
                 return _get_diffusers_model_info(
