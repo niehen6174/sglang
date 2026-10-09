@@ -54,6 +54,12 @@ class ComfyUIModelAdapter:
     ) -> torch.Tensor:
         return noise_pred.to(x.device)
 
+    def placeholder_output(self, x):
+        """Stand-in velocity while a CFG split step records its DiT calls."""
+        if isinstance(x, (list, tuple)):
+            return [torch.zeros_like(t) for t in x]
+        return torch.zeros_like(x)
+
     def fill_req(self, req, packed: PackedForward) -> None:
         req.latents = packed.latents
         req.timesteps = packed.timesteps

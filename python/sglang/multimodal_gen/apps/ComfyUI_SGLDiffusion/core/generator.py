@@ -504,4 +504,11 @@ class SGLDiffusionGenerator:
             "sgld_session",
             self.executor.sampler_sample_wrapper,
         )
+        self.executor.cfg_split_ranks = executor_class.cfg_split_ranks_for(sgld_options)
+        if self.executor.cfg_split_ranks > 1:
+            self._patcher.add_wrapper_with_key(
+                WrappersMP.CALC_COND_BATCH,
+                "sgld_cfg_split",
+                self.executor.calc_cond_batch_wrapper,
+            )
         return self._patcher

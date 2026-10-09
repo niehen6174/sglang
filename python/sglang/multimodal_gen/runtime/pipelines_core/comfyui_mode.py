@@ -44,8 +44,15 @@ _CONDITIONING_FIELDS = (
     "negative_prompt_embeds_mask",
     "sigmas",
 )
+# Extra key of a CFG split step: one dict of Req fields per CFG rank.
+COMFYUI_CFG_SPLIT_KEY = "comfyui_cfg_split"
 _SESSION_SKIP_EXTRA = frozenset(
-    {"comfyui_session_id", "comfyui_cond_key", "comfyui_cache_fp"}
+    {
+        "comfyui_session_id",
+        "comfyui_cond_key",
+        "comfyui_cache_fp",
+        COMFYUI_CFG_SPLIT_KEY,
+    }
 )
 _SESSIONS: dict[str, dict[str, Any]] = {}
 _RUNS: dict[str, Any] = {}

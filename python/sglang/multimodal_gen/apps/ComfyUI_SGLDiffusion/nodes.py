@@ -73,7 +73,13 @@ class SGLDOptions:
                 "dp_degree": ("INT", {"default": 1, "min": 1, "step": 1}),
                 "enable_cfg_parallel": (
                     "BOOLEAN",
-                    {"default": False},
+                    {
+                        "default": False,
+                        "tooltip": "Integrated mode, models with CFG split (Qwen-Image 2.1): "
+                        "with num_gpus=2, run each sampler step's cond and uncond DiT "
+                        "calls on one GPU each (needs CFG > 1). Not combinable with "
+                        "sp_degree / tp_size.",
+                    },
                 ),
                 "attention_backend": (
                     "STRING",
