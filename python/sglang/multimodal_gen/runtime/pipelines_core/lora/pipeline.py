@@ -762,6 +762,9 @@ class LoRAPipeline(ComposedPipelineBase):
         missing_layers_by_adapter = [[] for _ in lora_nicknames]
         applied_count_by_adapter = [0 for _ in lora_nicknames]
         for name, layer in lora_layers.items():
+            if clear_existing and layer.merged:
+                layer.unmerge_lora_weights()
+            applied_to_layer = False
             # Apply all LoRA adapters in order
             for idx, (nickname, path, lora_strength) in enumerate(
                 zip(lora_nicknames, lora_paths, strengths)
@@ -803,11 +806,10 @@ class LoRAPipeline(ComposedPipelineBase):
                         strength=lora_strength,
                         merge_weights=merge_weights and not use_cache,
                         clear_existing=(
-                            clear_existing and idx == 0
+                            clear_existing and not applied_to_layer
                         ),  # Only clear on first LoRA
                     )
-                    if use_cache and idx == len(lora_nicknames) - 1:
-                        self._merge_via_cache(name, layer, merge_cache)
+                    applied_to_layer = True
                     adapted_count += 1
                     applied_count_by_adapter[idx] += 1
                 else:
@@ -821,6 +823,9 @@ class LoRAPipeline(ComposedPipelineBase):
                         )
                         if not has_any_lora:
                             layer.disable_lora = True
+
+            if applied_to_layer and merge_weights and merge_cache is not None:
+                self._merge_via_cache(name, layer, merge_cache)
 
         if rank == 0:
             total_layers = len(lora_layers)
@@ -1118,20 +1123,20 @@ class LoRAPipeline(ComposedPipelineBase):
                 self.loaded_adapter_alphas[nickname] = alpha
                 adapter_updated = True
 
-        # Group by target to apply separately
+        # Expand overlapping targets (e.g. all + transformer) before grouping.
         target_to_indices = {}
+        target_layers = {}
         for idx, tgt in enumerate(targets):
-            if tgt not in target_to_indices:
-                target_to_indices[tgt] = []
-            target_to_indices[tgt].append(idx)
-
-        adapted_count = 0
-        for tgt, idx_list in target_to_indices.items():
             target_modules, error = self._get_target_lora_layers(tgt)
             if error:
                 logger.warning("set_lora: %s", error)
-            if not target_modules:
-                continue
+            for module_name, layers in target_modules:
+                target_to_indices.setdefault(module_name, []).append(idx)
+                target_layers[module_name] = layers
+
+        adapted_count = 0
+        for tgt, idx_list in target_to_indices.items():
+            target_modules = [(tgt, target_layers[tgt])]
 
             tgt_nicknames = [lora_nicknames[i] for i in idx_list]
             tgt_paths = [
@@ -1150,12 +1155,6 @@ class LoRAPipeline(ComposedPipelineBase):
             first_effective_merge_weights = self._should_merge_lora_for_layers(
                 first_module_name, first_lora_layers_dict, merge_mode
             )
-            if not first_effective_merge_weights and len(tgt_nicknames) > 1:
-                raise ValueError(
-                    "Dynamic LoRA currently supports only one adapter per target. "
-                    "Use merge_mode='merge' for multiple adapters."
-                )
-
             merge_weights_by_module = {}
             for module_name, lora_layers_dict in target_modules:
                 merge_weights_by_module[module_name] = (
