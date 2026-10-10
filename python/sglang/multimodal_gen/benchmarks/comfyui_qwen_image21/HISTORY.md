@@ -670,3 +670,91 @@ INT8 runs at 4.5 it/s with the LoRA (dynamic) and 6.4 it/s without.
 - All have the same composition (`multigpu/rb_side_by_side_s1002.jpg` shows the lowest-PSNR seed).
 
 All processes were stopped afterwards; both GPUs read 0 MiB.
+
+---
+
+# Generic ComfyUI path + condition stage (round 8)
+
+**Change.** The custom `QwenImage21ComfyUIStepStage` (its own DiT call) is gone. `create_comfyui_stages` now uses the same stage sequence as the generic path, with a small Qwen stage in the middle:
+1. `ComfyUILatentPreparationStage` (generic): restores the session and binds the pass-through scheduler.
+2. `QwenImage21ComfyUIConditionStage` (new, ~70 lines, in `model_specific_stages/qwen_image21.py` next to the native stages):
+   - packs the latent to `[B, H*W, 64]` and keeps one timestep, because ComfyUI repeats one sigma per row and the generic loop runs one step per timestep entry;
+   - builds, once per cond per sampler run (session run state): the placeholder context, `build_layout`, `condition_latents` and the prefix K/V cache slots (same `_cache_fits` rule with TP/SP agreement);
+   - sets `prompt_embeds` and `extra["qwen21_positive"]`.
+3. Native `QwenImage21DenoisingStage`: the shared denoising loop reaches the DiT through the existing `prepare_pos_cond_kwargs` / `post_denoising_loop` hooks.
+
+The adapter gained a 3-line `unpack` (`[B, H*W, 64]` back to `x.shape`). Nothing common changed: generic stages, `comfyui_mode.py`, `denoising.py` and the configs are untouched.
+
+The stage lives in `qwen_image21.py`, not its own file, because it is small and shares imports with the native stages: `build_layout`, the TP helpers and `PipelineStage`.
+
+**Code size, vs 77133e077a (`+` lines vs the common branch):**
+
+| part | before | after |
+|---|---|---|
+| worker commit | 262 | 199 |
+| ComfyUI stage code | 161 (own file) | 95 (in `qwen_image21.py`) |
+| pipeline hook | 25 | 28 |
+| plugin executor | 91 | 95 |
+| unit tests | 346 | 326 |
+| all non-test, non-JSON, non-README | 359 | 300 |
+
+**DiT parity** (`r8/parity_{old,new}.json`, fresh ComfyUI capture, 6 cases × 4 sigmas):
+- New-path outputs are **bit-identical** to the old step stage for all 24 calls: t2i 64² and 63×80, CFG B=2, edit1 64² and 63², edit2 B=2 (`r8/dit_old_vs_new.txt`).
+- Metrics vs ComfyUI are therefore unchanged:
+
+  | case | cos |
+  |---|---|
+  | t2i | ≥ 0.99991 |
+  | CFG B=2 | ≥ 0.99978 |
+  | edit1 64² | ≥ 0.99984 |
+  | edit2 B=2 | ≥ 0.99979 |
+
+**Per-call latency** (`scripts/bench_step.py`, 30 cached calls, median):
+
+| case | old | new | change |
+|---|---|---|---|
+| t2i | 323.57 ms | 324.16 ms | +0.18% |
+| edit1 | 372.47 ms | 372.96 ms | +0.13% |
+
+**E2E** (fresh server, `scripts/run_r8_smoke.sh`, same seeds as the slim session). Every bf16 image is **bit-identical** to the slim / rebase images:
+- t2i s1000–1002;
+- CFG 4 s4000–4001;
+- edit1 s2000–2001;
+- edit2 s3000–3001;
+- edit1odd 1008²;
+- turbo LoRA bf16 at 1.0 (s7, s8), off and 0.5.
+
+The server reported these times ("Prompt executed"):
+
+| workflow | old (slim session) | new |
+|---|---|---|
+| t2i | 3.02–3.08 it/s, 8.54 / 8.68 s | 3.04–3.09 it/s, 8.57 / 8.63 s |
+| CFG 4 | 17.75 / 16.80 s | 17.62 / 16.84 s |
+| edit1 | 2.66–2.67 it/s, 12.11 / 10.20 s | 2.65–2.66 it/s, 12.09 / 10.21 s |
+| edit2 | 2.37 it/s, 14.52 / 11.72 s | 2.34–2.36 it/s, 14.34 / 11.80 s |
+| turbo LoRA warm | 2.42–2.48 s | 2.46 s |
+
+A second full session (`r8/smoke2*`) gave bit-identical images again and times within ±1%. Native LoRA on an SGLD model still fails loudly.
+
+**INT8 t2i.** Fresh server, INT8 only, s1000–1002 (`r8/int8{old,new}*`):
+- New is **bit-identical** to 77133e077a.
+- Old and new both run at 6.22–6.31 it/s, 4.39–4.42 s warm.
+- Both differ from the round-1/3 INT8 images by 21.5–26.1 dB. The cause is the slim branch's float32 native RoPE (see round 7), not this change. Against official INT8 the new images give 25.7 / 26.9 / 20.4 dB (round 1: 26.6 / 25.7 / 19.0).
+
+**Ulysses2 on 2 GPUs** (both GPUs were free; `scripts/mg_e2e.sh r8_uly2`):
+- t2i s1000–1002 and edit1 s2000–2001 are **bit-identical** to round 7 (`r8/uly2_compare.json`).
+- 3.77–3.79 it/s, 30.76 / 7.00 / 6.99 s; edit 3.42–3.43 it/s.
+
+**Unit tests** (GPU 0): 86 passed, 1 skipped, 3 xfailed across `test_comfyui_*`. The Qwen file has 10 tests; the step-stage tests were replaced by condition-stage tests plus an adapter unpack check.
+
+**Behaviour changes:**
+- SP with an odd target token count now fails with the DiT's own `ValueError: target token count N must be divisible by SP degree 2`. Before, the stage raised its own, longer message.
+- A worker that lost its session mid-run fails in generic latent preparation, as for other models. Before, it gave a Qwen-specific message.
+
+**Decision: adopted.** Code is smaller, outputs are bit-identical, time is within noise, and tests and multi-GPU pass.
+
+New history:
+- `feat/comfyui-qwen-image21` = a810e8dca1 + 443174000a (worker) + 998373f6e6 (plugin);
+- `test/qwen-image21-comfyui-benchmarks` = that + the report commit.
+
+Old heads are kept as `archive/comfyui-qwen-image21-v3` (77133e077a) and `archive/qwen-image21-comfyui-benchmarks-v1`. Nothing was pushed.

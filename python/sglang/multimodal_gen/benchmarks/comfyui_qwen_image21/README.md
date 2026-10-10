@@ -15,22 +15,30 @@ Take the official Qwen-Image 2.1 t2i or edit template and replace `UNETLoader` w
 | `feat/comfyui-plugin-fixes` | model-agnostic plugin fixes; the only common-component change is `spec.py`, +22 / -7 |
 | `feat/comfyui-qwen-image21` | + `[diffusion] feat: Qwen-Image 2.1 ComfyUI-mode worker`, + `[diffusion] feat: ComfyUI integrated mode for Qwen-Image 2.1` |
 
-The Qwen commits add 13 files, +1029 / -1. Without tests, workflow JSON and README that is +359 lines:
-- a new checkpoint spec (`comfyui_checkpoints/qwen_image21.py`);
-- a step stage (`qwen_image21_comfyui.py`);
-- the executor/adapter;
+The Qwen commits add 13 files, +950 / -1. Without tests, workflow JSON and README that is +300 lines:
+- a new checkpoint spec (`comfyui_checkpoints/qwen_image21.py`, 74 lines);
+- a condition stage (`QwenImage21ComfyUIConditionStage`, +95 lines in `model_specific_stages/qwen_image21.py`);
 - a `create_comfyui_stages` hook in `pipelines/qwen_image21.py`;
+- the executor/adapter (95 lines);
 - registration lines.
 
-There are no changes to the native DiT, LoRA, quantization or scheduler code.
+The worker commit is +199 lines. There are no changes to the native DiT, LoRA, quantization or scheduler code, nor to the generic ComfyUI stages, `comfyui_mode.py`, `denoising.py` or the pipeline configs.
 
 ## Design
 
 - **ComfyUI side.** ComfyUI keeps the text encoder, VAE and sampler.
   - Each `apply_model` call becomes one SGLang request: the latent `[B, 64, H/16, W/16]`, `t = sigma × 1000`, the context, `image_slots` and the reference latents.
   - Conditioning is sent once per cond; later steps send only latent + timestep.
-- **Worker side.** The native `build_layout` is reused: each ComfyUI image slot becomes one placeholder token, which the DiT fills with `img_in(condition_latents)`.
-- **Prefix K/V cache.** Per sampler run and per cond, kept on the GPU when free memory is more than twice its size (agreed across TP/SP ranks), otherwise recomputed.
+- **Worker side.** The generic ComfyUI stage sequence, with one small Qwen stage:
+  1. `ComfyUILatentPreparationStage` (generic): restores the session and binds the pass-through scheduler.
+  2. `QwenImage21ComfyUIConditionStage`:
+     - packs the latent to `[B, H*W, 64]`;
+     - converts each ComfyUI image slot to one placeholder token for the native `build_layout`, which the DiT fills with `img_in(condition_latents)`;
+     - sets `prompt_embeds` and `extra["qwen21_positive"]`, the same inputs native generation produces.
+  3. Native `QwenImage21DenoisingStage`: the shared denoising loop.
+
+  The adapter unpacks the `[B, H*W, 64]` prediction back to `x`'s shape.
+- **Prefix K/V cache.** Built in the condition stage once per sampler run and per cond (session run state). It is kept on the GPU when free memory is more than twice its size (agreed across TP/SP ranks), otherwise recomputed.
 - **CFG.** CFG stays in ComfyUI. `enable_cfg_parallel` is rejected with a clear error; see `cfg_split/DESIGN.md` on branch `wip/comfyui-cfg-split` for the parked CFG-split design.
 - **INT8 ConvRot DiT.** Loaded through the common `quant_markers` spec hook.
 - **No ComfyUI numeric alignment.** Native SGLang semantics are used throughout.
@@ -46,17 +54,19 @@ DiT single step vs ComfyUI's own DiT, same inputs, cosine similarity:
 | edit, 1 ref | 0.99984 |
 | edit, 2 refs | 0.99979 |
 
+These outputs are bit-identical to the earlier custom step stage (24 of 24 calls), and the cached per-call time is the same: 324 ms t2i and 373 ms edit, within 0.2%.
+
 End to end via the ComfyUI `/prompt` API (server "Prompt executed"):
 
 | workflow | official | integrated | PSNR vs official |
 |---|---|---|---|
-| t2i, 25 steps, cold / warm | 13.7 / 8.62 s | 31.7–35.0 / 8.54 s | 23–29 dB |
-| CFG 4 + negative | ~17.0 s | ~16.8–17.8 s | 18–19 dB |
-| edit, 1 ref, warm | 10.32 s | 10.20 s | 37–47 dB |
-| edit, 2 refs, warm | 11.81 s | 11.72 s | 24–28 dB |
-| INT8 t2i, warm (measured before slimming) | 4.2 s | 4.4 s | 19–27 dB |
+| t2i, 25 steps, cold / warm | 13.7 / 8.62 s | 31.0 / 8.57–8.63 s | 23–29 dB |
+| CFG 4 + negative | ~17.0 s | 16.8–17.6 s | 18–19 dB |
+| edit, 1 ref, warm | 10.32 s | 10.21 s | 37–47 dB |
+| edit, 2 refs, warm | 11.81 s | 11.71–11.80 s | 24–28 dB |
+| INT8 t2i, warm | 4.2 s | 4.39–4.42 s | 20–27 dB |
 
-All pairs have the same composition. For scale, ComfyUI against itself with the prefix cache on vs off differs by 19–34 dB, and two different seeds differ by ~8 dB.
+All pairs have the same composition. The bf16 images, including LoRA, are bit-identical to those of the earlier step-stage design. For scale, ComfyUI against itself with the prefix cache on vs off differs by 19–34 dB, and two different seeds differ by ~8 dB.
 
 **LoRA** (`Viggle/Qwen-Image-2.1-viggle-turbo`, 6 steps, `SGLDLoraLoader`):
 - **Applied:** sharp with the LoRA (sharpness 936), soft without it (464); official has the same pattern.
@@ -70,12 +80,13 @@ All pairs have the same composition. For scale, ComfyUI against itself with the 
 | config | it/s | warm t2i | peak VRAM GPU0 / GPU1 |
 |---|---|---|---|
 | 1 GPU | 3.05 | 8.54 s | ~20 GB |
-| Ulysses SP2, or `num_gpus=2` auto | 3.79 | 7.0 s | 20.2 / 17.4 GB |
+| Ulysses SP2, or `num_gpus=2` auto | 3.77–3.81 | 7.0 s | 20.2 / 17.4 GB |
 | TP2 | 3.17 | 8.3 s | ~12 / 9.6 GB |
 
 - **Ring SP:** not available on SM120 here; it needs an LSE-returning attention backend.
 - **CFG parallel:** rejected.
-- **Output vs 1 GPU:** same composition. SP requires an even target token count, and fails clearly otherwise.
+- **Output vs 1 GPU:** same composition. Ulysses2 output is bit-identical to the earlier step-stage design.
+- **SP token count:** SP requires an even target token count. Otherwise the DiT raises `target token count N must be divisible by SP degree 2`.
 
 ## Known limitations
 
