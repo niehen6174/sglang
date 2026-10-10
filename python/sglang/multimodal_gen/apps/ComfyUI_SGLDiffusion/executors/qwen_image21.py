@@ -9,7 +9,7 @@ latents (no patchify).
 from .adapter import ComfyUIModelAdapter, PackedForward
 from .base import SGLDiffusionExecutor
 
-# Must match COND_EXTRA_KEY in the worker's qwen_image21_comfyui stage; not
+# Must match COMFYUI_COND_EXTRA_KEY in the worker's qwen_image21 stages; not
 # imported so the ComfyUI process does not load the denoising stack.
 COND_EXTRA_KEY = "qwen21_cond"
 # Spatial downscale of the Qwen-Image 2.1 VAE.
@@ -58,6 +58,10 @@ class QwenImage21Adapter(ComfyUIModelAdapter):
             width=int(x.shape[-1]) * _LATENT_SCALE,
             extra_req={COND_EXTRA_KEY: payload},
         )
+
+    def unpack(self, noise_pred, packed, x):
+        # The worker returns the native token layout [B, H*W, 64].
+        return noise_pred.transpose(1, 2).reshape(x.shape).to(x.device)
 
     def fill_req(self, req, packed: PackedForward) -> None:
         super().fill_req(req, packed)

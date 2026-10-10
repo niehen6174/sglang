@@ -23,11 +23,12 @@ from sglang.multimodal_gen.runtime.loader.comfyui_checkpoints import (
 )
 from sglang.multimodal_gen.runtime.models.dits.qwen_image21 import build_layout
 from sglang.multimodal_gen.runtime.pipelines_core.comfyui_mode import (
+    bind_comfyui_session,
     get_run_state,
     release_comfyui_session,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages import (
-    qwen_image21_comfyui as stage_mod,
+    qwen_image21 as stage_mod,
 )
 
 AXES = (16, 56, 56)
@@ -146,7 +147,7 @@ def test_placeholders_for_missing_and_trailing_slots() -> None:
 
 def test_adapter_registration_and_payload() -> None:
     assert get_adapter_class("qwen_image21") is QwenImage21Adapter
-    assert stage_mod.COND_EXTRA_KEY == COND_EXTRA_KEY
+    assert stage_mod.COMFYUI_COND_EXTRA_KEY == COND_EXTRA_KEY
     adapter = QwenImage21Adapter()
     x = torch.randn(2, 64, 5, 7)
     ref = torch.randn(2, 64, 4, 4)
@@ -160,6 +161,8 @@ def test_adapter_registration_and_payload() -> None:
     assert packed.latents is x
     assert torch.equal(packed.timesteps, torch.tensor([500.0, 500.0]))
     assert (packed.height, packed.width) == (80, 112)
+    noise = x.flatten(2).transpose(1, 2).contiguous()
+    assert torch.equal(adapter.unpack(noise, packed, x), x)
     req = SimpleNamespace(extra={"comfyui_session_id": "s:1"})
     adapter.fill_req(req, packed)
     assert req.extra[COND_EXTRA_KEY] == {"image_slots": [3], "ref_latents": [ref]}
@@ -182,39 +185,17 @@ def test_cfg_parallel_is_rejected() -> None:
     QwenImage21Executor.validate_sgld_options({"num_gpus": 2, "sp_degree": 2})
 
 
-# ----- worker stage --------------------------------------------------------------
+# ----- worker condition stage ---------------------------------------------------
 
 
-class _FakeDiT:
-    def __init__(self):
-        self.calls = []
-
-    def __call__(self, *, hidden_states, prefix_caches, **kwargs):
-        prefilled = [bool(c[0]) for c in prefix_caches or []]
-        for caches in prefix_caches or []:
-            for layer in caches:
-                layer.setdefault("key", torch.ones(1))
-        self.calls.append(
-            dict(prefix_caches=prefix_caches, prefilled=prefilled, **kwargs)
-        )
-        return hidden_states * 2
-
-
-def _stage(monkeypatch, fits=True, sp=1):
-    stage = stage_mod.QwenImage21ComfyUIStepStage.__new__(
-        stage_mod.QwenImage21ComfyUIStepStage
-    )
-    stage.server_args = SimpleNamespace(
+def _run(monkeypatch, req, fits=True):
+    """Condition stage after ComfyUILatentPreparationStage restored the session."""
+    monkeypatch.setattr(stage_mod, "_cache_fits", lambda need, device: fits)
+    server_args = SimpleNamespace(
         pipeline_config=SimpleNamespace(dit_config=_small_dit_config())
     )
-    fake = _FakeDiT()
-    stage.transformer = fake
-    stage._predict_noise = lambda current_model, latent_model_input, **kw: (
-        current_model(hidden_states=latent_model_input, **kw)
-    )
-    monkeypatch.setattr(stage_mod, "_cache_fits", lambda need, device: fits)
-    monkeypatch.setattr(stage_mod, "get_sp_world_size", lambda: sp)
-    return stage, fake
+    bind_comfyui_session(req)
+    return stage_mod.QwenImage21ComfyUIConditionStage().forward(req, server_args)
 
 
 def _req(sid, key, latents, sigma, context=None, payload=None):
@@ -229,37 +210,35 @@ def _req(sid, key, latents, sigma, context=None, payload=None):
     )
 
 
-def test_step_stage_caches_the_prefix_per_cond_for_the_run(monkeypatch) -> None:
-    stage, fake = _stage(monkeypatch)
+def test_condition_stage_is_built_once_per_cond_for_the_run(monkeypatch) -> None:
     x = torch.randn(1, 64, 3, 4)
     pos, neg = torch.randn(1, 5, 16), torch.randn(1, 7, 16)
     payload = {"image_slots": [], "ref_latents": []}
+    built = {}
     try:
         for sigma in (1.0, 0.5):
             first = sigma == 1.0
             for key, ctx in (("pos", pos), ("neg", neg)):
-                req = _req(
-                    "exec:1",
-                    key,
-                    x,
-                    sigma,
-                    ctx if first else None,
-                    payload if first else None,
+                req = _run(
+                    monkeypatch,
+                    _req(
+                        "exec:1",
+                        key,
+                        x,
+                        sigma,
+                        ctx if first else None,
+                        payload if first else None,
+                    ),
                 )
-                out = stage.forward(req, None)
-                assert torch.equal(out.noise_pred, x.to(torch.bfloat16) * 2)
-        assert [c["prefilled"] for c in fake.calls] == [
-            [False],
-            [False],
-            [True],
-            [True],
-        ]
-        assert fake.calls[2]["encoder_hidden_states"].shape[1] == 5
-        assert fake.calls[3]["encoder_hidden_states"].shape[1] == 7
+                assert torch.equal(req.latents, x.flatten(2).transpose(1, 2))
+                cond = req.extra["qwen21_positive"]
+                assert req.prompt_embeds[0].shape[1] == ctx.shape[1]
+                assert cond["condition_latents"] is None
+                assert built.setdefault(key, cond) is cond
         state = get_run_state(SimpleNamespace(extra={"comfyui_session_id": "exec:1"}))
         assert len(state) == 2
         # The next sampler run of this executor evicts the old run's caches.
-        stage.forward(_req("exec:2", "pos", x, 1.0, pos, payload), None)
+        _run(monkeypatch, _req("exec:2", "pos", x, 1.0, pos, payload))
         assert (
             get_run_state(SimpleNamespace(extra={"comfyui_session_id": "exec:1"}))
             is None
@@ -269,32 +248,26 @@ def test_step_stage_caches_the_prefix_per_cond_for_the_run(monkeypatch) -> None:
         release_comfyui_session("exec:2")
 
 
-def test_step_stage_batch_rows_refs_and_no_room(monkeypatch) -> None:
-    stage, fake = _stage(monkeypatch, fits=False)
+def test_condition_stage_batch_rows_refs_and_no_room(monkeypatch) -> None:
     x = torch.randn(2, 64, 2, 2)
     ref = torch.randn(1, 64, 2, 2)
     payload = {"image_slots": [1], "ref_latents": [ref]}
     try:
-        stage.forward(_req("b:1", "k", x, 1.0, torch.randn(2, 3, 16), payload), None)
-        call = fake.calls[-1]
-        assert call["prefix_caches"] is None  # no room: recompute every step
-        assert len(call["layouts"]) == 2
-        assert call["condition_latents"].shape == (2, 4, 64)
-        assert call["encoder_hidden_states"].shape == (2, 4, 16)  # + 1 placeholder
-        assert call["timestep"].shape == (2,)
+        req = _run(
+            monkeypatch,
+            _req("b:1", "k", x, 1.0, torch.randn(2, 3, 16), payload),
+            fits=False,
+        )
+        cond = req.extra["qwen21_positive"]
+        assert cond["prefix_caches"] is None  # no room: recompute every step
+        assert len(cond["layouts"]) == 2
+        assert cond["layouts"][0]["image_indices"].tolist() == [1, 2, 3, 4]
+        assert cond["condition_latents"].shape == (2, 4, 64)
+        assert req.prompt_embeds[0].shape == (2, 4, 16)  # + 1 placeholder
+        assert req.latents.shape == (2, 4, 64)
+        assert req.timesteps.tolist() == [1000.0]  # one loop step for both rows
     finally:
         release_comfyui_session("b:1")
-
-
-def test_step_stage_errors(monkeypatch) -> None:
-    stage, _ = _stage(monkeypatch)
-    with pytest.raises(RuntimeError, match="no conditioning"):
-        stage.forward(_req("lost:1", "k", torch.randn(1, 64, 2, 2), 0.5), None)
-    release_comfyui_session("lost:1")
-    stage, _ = _stage(monkeypatch, sp=2)
-    with pytest.raises(ValueError, match="3969 tokens"):
-        stage.forward(_req("sp:1", "k", torch.randn(1, 64, 63, 63), 1.0), None)
-    release_comfyui_session("sp:1")
 
 
 def test_cache_decision_is_agreed_across_tp_ranks(monkeypatch) -> None:
@@ -318,24 +291,31 @@ def test_cache_decision_is_agreed_across_tp_ranks(monkeypatch) -> None:
     assert seen == ["tp", "tp"]
 
 
-def test_pipeline_installs_comfyui_step_stage(monkeypatch) -> None:
+def test_pipeline_uses_generic_comfyui_stages(monkeypatch) -> None:
     from sglang.multimodal_gen.runtime.pipelines.qwen_image21 import QwenImage21Pipeline
+    from sglang.multimodal_gen.runtime.pipelines_core.stages import (
+        ComfyUILatentPreparationStage,
+    )
 
     created = {}
 
     def _fake_init(self, transformer, scheduler):
         created["modules"] = (transformer, scheduler)
 
-    monkeypatch.setattr(stage_mod.QwenImage21ComfyUIStepStage, "__init__", _fake_init)
+    monkeypatch.setattr(stage_mod.QwenImage21DenoisingStage, "__init__", _fake_init)
     pipe = SimpleNamespace(
         modules={"transformer": object(), "scheduler": object()}, stages=[]
     )
     pipe.get_module = pipe.modules.__getitem__
-    pipe.add_stage = lambda stage, stage_name=None: pipe.stages.append(stage)
+    pipe.add_stages = pipe.stages.extend
     QwenImage21Pipeline.create_comfyui_stages(
         pipe, SimpleNamespace(enable_cfg_parallel=False)
     )
-    assert [type(s) for s in pipe.stages] == [stage_mod.QwenImage21ComfyUIStepStage]
+    assert [type(s) for s in pipe.stages] == [
+        ComfyUILatentPreparationStage,
+        stage_mod.QwenImage21ComfyUIConditionStage,
+        stage_mod.QwenImage21DenoisingStage,
+    ]
     assert created["modules"] == (
         pipe.modules["transformer"],
         pipe.modules["scheduler"],

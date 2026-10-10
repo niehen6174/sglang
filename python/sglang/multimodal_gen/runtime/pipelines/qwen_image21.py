@@ -8,7 +8,11 @@ from sglang.multimodal_gen.runtime.pipelines_core import LoRAPipeline
 from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
     ComposedPipelineBase,
 )
+from sglang.multimodal_gen.runtime.pipelines_core.stages import (
+    ComfyUILatentPreparationStage,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.qwen_image21 import (
+    QwenImage21ComfyUIConditionStage,
     QwenImage21DenoisingStage,
     QwenImage21EncodingStage,
     QwenImage21InputValidationStage,
@@ -62,15 +66,14 @@ class QwenImage21Pipeline(LoRAPipeline, ComposedPipelineBase):
                 "enable_cfg_parallel is not supported for Qwen-Image 2.1 in "
                 "--comfyui-mode; use sp_degree or tp_size"
             )
-        from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.qwen_image21_comfyui import (
-            QwenImage21ComfyUIStepStage,
-        )
-
-        self.add_stage(
-            QwenImage21ComfyUIStepStage(
-                transformer=self.get_module("transformer"),
-                scheduler=self.get_module("scheduler"),
-            )
+        transformer = self.get_module("transformer")
+        scheduler = self.get_module("scheduler")
+        self.add_stages(
+            [
+                ComfyUILatentPreparationStage(scheduler, transformer),
+                QwenImage21ComfyUIConditionStage(),
+                QwenImage21DenoisingStage(transformer, scheduler),
+            ]
         )
 
 
