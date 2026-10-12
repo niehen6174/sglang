@@ -159,6 +159,10 @@ def main():
     lines += [f"- price: ${PRICE_PER_H.get(card, '?')}/GPU-hour ({PRICE_SOURCE})", ""]
     lines += track_a(card, load(suite / "A" / "results.jsonl"), csv_rows) + [""]
     lines += track_b(card, load(suite / "B" / "results.jsonl"), csv_rows) + [""]
+    # Re-runs with extra server flags (e.g. B-vae-tiling) live in sibling B-<variant>/ suites.
+    for extra in sorted(p for p in suite.glob("B-*") if (p / "results.jsonl").exists()):
+        sub = track_b(card, load(extra / "results.jsonl"), csv_rows)
+        lines += [f"### Track B variant: {extra.name}", ""] + sub[2:] + [""]
     q = load(suite / "quality.jsonl")
     if q:
         lines += ["## Quality against the reference config", "", "| track | engine | variant | reference | kind | PSNR dB | SSIM | latent cos |",
