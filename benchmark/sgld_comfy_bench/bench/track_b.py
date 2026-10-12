@@ -83,6 +83,10 @@ EXPERIMENTS = [
 
 
 # ---- model paths: both engines load the same pinned local snapshot --------------------------
+def revision(repo):
+    return next(r for name, r, _ in models.TRACK_B_REPOS if name == repo)
+
+
 def snapshot(repo):
     rev, patterns = next((r, pat) for name, r, pat in models.TRACK_B_REPOS if name == repo)
     return snapshot_download(repo, revision=rev, allow_patterns=patterns, local_files_only=True)
@@ -106,7 +110,9 @@ def sglang_server(e, card, port):
             args = ["--model-path", snapshot("MiniMaxAI/MiniMax-H3"), "--model-variant", "ref2va" if s.get("refs") else "fl2va",
                     "--attention-backend", attn]
     elif m == "ltx":
-        args = ["--model-path", snapshot("Lightricks/LTX-2.5-Diffusers"), "--pipeline-class-name",
+        # By repo id: SGLang re-validates the local LTX snapshot and fetches any component it lacks by name.
+        args = ["--model-path", "Lightricks/LTX-2.5-Diffusers", "--revision", revision("Lightricks/LTX-2.5-Diffusers"),
+                "--pipeline-class-name",
                 "LTX2TwoStagePipeline" if s["stage"] == "two" else "LTX2Pipeline", "--attention-backend", attn]
     else:
         args = ["--model-path", snapshot("Qwen/Qwen-Image-2.1"), "--attention-backend", attn]
@@ -168,7 +174,7 @@ def vllm_server(e, card, port):
             args += ["--lora-path", snapshot(models.VDN_REPO)]
             attn = "VDNH3_ATTN"
     elif m == "ltx":
-        args = [snapshot("Lightricks/LTX-2.5-Diffusers"), "--model-class-name",
+        args = ["Lightricks/LTX-2.5-Diffusers", "--revision", revision("Lightricks/LTX-2.5-Diffusers"), "--model-class-name",
                 "LTX2DistilledTwoStagePipeline" if s["stage"] == "two" else "LTX2DistilledOneStagePipeline"]
     else:
         args = [snapshot("Qwen/Qwen-Image-2.1")]

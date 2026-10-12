@@ -123,8 +123,9 @@ TRACK_B_REPOS = [
     ("MiniMaxAI/MiniMax-H3", "42ed227ee7df", ["*.json", "FL2VA/**", "Ref2VA/**", "audio_scheduler/**", "scheduler/**"]),
     # Distilled one-/two-stage: transformer, connectors, text encoder, VAEs, vocoder, upsampler (~120 GB).
     ("Lightricks/LTX-2.5-Diffusers", "da0b69096002",
-     ["*.json", "*.txt", "tokenizer*/**", "scheduler/**", "transformer/**", "connectors/**", "text_encoder/**",
-      "vae/**", "audio_vae/**", "vocoder/**", "latent_upsampler/**"]),
+     ["*.json", "*.txt", "tokenizer*/**", "processor/**", "scheduler/**", "transformer/**", "connectors/**",
+      "text_encoder/**", "vae/**", "audio_vae/**", "vocoder/**", "latent_upsampler/**", "temporal_latent_upsampler/**",
+      "duration_head/**", "diffusion_decoder/**"]),
     ("Qwen/Qwen-Image-2.1", "d26bb61231c3", None),  # 33 GB
     # vllm-omni's VDN adapter path (same revision SGLD prefuses from).
     (VDN_REPO, VDN_REV, None),
