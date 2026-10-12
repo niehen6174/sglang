@@ -68,6 +68,20 @@ if [ "$SKIP_VLLM" = 0 ]; then
   VIRTUAL_ENV="$VENV_VLLM" uv pip install -q "vllm==$VLLM_VERSION" --torch-backend=auto --extra-index-url "$VLLM_INDEX"
   VIRTUAL_ENV="$VENV_VLLM" uv pip install -q -e "$VLLM_OMNI_SRC"
   "$VENV_VLLM/bin/python" -c "import vllm, vllm_omni, torch; print('vllm', vllm.__version__, 'torch', torch.__version__)"
+  if [ "$SKIP_SAGE" = 0 ]; then
+    # vllm-omni's SAGE_ATTN / SAGE_ATTN_3 need SageAttention built against this venv's own torch.
+    SAGE_V="$WORKSPACE/deps/SageAttention-vllm"
+    [ -d "$SAGE_V/.git" ] || git clone https://github.com/thu-ml/SageAttention.git "$SAGE_V"
+    git -C "$SAGE_V" checkout -q "$SAGE_COMMIT"
+    if ! "$VENV_VLLM/bin/python" -c "import sageattention" 2>/dev/null; then
+      (cd "$SAGE_V" && VIRTUAL_ENV="$VENV_VLLM" PATH="$VENV_VLLM/bin:$PATH" TORCH_CUDA_ARCH_LIST=$ARCH EXT_PARALLEL=4 MAX_JOBS=16 \
+        uv pip install --no-build-isolation --no-deps .)
+    fi
+    if { [ "$CARD" = 5090 ] || [ "$CARD" = b200 ]; } && ! "$VENV_VLLM/bin/python" -c "import sageattn3" 2>/dev/null; then
+      (cd "$SAGE_V/sageattention3_blackwell" && VIRTUAL_ENV="$VENV_VLLM" PATH="$VENV_VLLM/bin:$PATH" TORCH_CUDA_ARCH_LIST=$ARCH \
+        MAX_JOBS=16 uv pip install --no-build-isolation --no-deps .) || echo "!! SageAttention 3 build failed in the vllm-omni venv"
+    fi
+  fi
 fi
 
 step "link ComfyUI nodes and inputs"
