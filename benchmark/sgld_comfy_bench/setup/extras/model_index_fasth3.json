@@ -1,0 +1,51 @@
+{
+  "_class_name": "FastH3Pipeline",
+  "_diffusers_version": "0.36.0.dev0",
+  "text_encoder": [
+    null,
+    null
+  ],
+  "tokenizer": [
+    null,
+    null
+  ],
+  "video_vae": [
+    null,
+    null
+  ],
+  "audio_vae": [
+    null,
+    null
+  ],
+  "scheduler": null,
+  "transformer": [
+    "diffusers",
+    "MiniMaxH3DiTModel"
+  ],
+  "processor": [
+    null,
+    null
+  ],
+  "_minimax_h3": {
+    "schema_version": 1,
+    "partition": "fl2va",
+    "tasks": [
+      "t2va"
+    ],
+    "task_aliases": {},
+    "sigma_shift_scales": {
+      "video": 10.0,
+      "audio": 3.0
+    },
+    "dmd_denoising_steps": [
+      999,
+      874,
+      749,
+      624,
+      500,
+      375,
+      250,
+      125
+    ]
+  }
+}

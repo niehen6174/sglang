@@ -1,0 +1,237 @@
+{
+ "75": {
+  "class_type": "SaveVideo",
+  "inputs": {
+   "video": [
+    "242",
+    0
+   ],
+   "filename_prefix": "video/bench/F-07",
+   "format": "mp4",
+   "codec": "h264"
+  }
+ },
+ "209": {
+  "class_type": "KSamplerSelect",
+  "inputs": {
+   "sampler_name": "euler"
+  }
+ },
+ "214": {
+  "class_type": "LTXVEmptyLatentAudio",
+  "inputs": {
+   "audio_vae": [
+    "221",
+    0
+   ],
+   "frames_number": 49,
+   "frame_rate": 25,
+   "batch_size": 1
+  }
+ },
+ "215": {
+  "class_type": "SamplerCustomAdvanced",
+  "inputs": {
+   "noise": [
+    "237",
+    0
+   ],
+   "guider": [
+    "231",
+    0
+   ],
+   "sampler": [
+    "209",
+    0
+   ],
+   "sigmas": [
+    "252",
+    0
+   ],
+   "latent_image": [
+    "222",
+    0
+   ]
+  }
+ },
+ "217": {
+  "class_type": "LTXVSeparateAVLatent",
+  "inputs": {
+   "av_latent": [
+    "215",
+    0
+   ]
+  }
+ },
+ "220": {
+  "class_type": "LTXVAudioVAEDecode",
+  "inputs": {
+   "samples": [
+    "217",
+    1
+   ],
+   "audio_vae": [
+    "221",
+    0
+   ]
+  }
+ },
+ "221": {
+  "class_type": "LTXVAudioVAELoader",
+  "inputs": {
+   "ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors"
+  }
+ },
+ "222": {
+  "class_type": "LTXVConcatAVLatent",
+  "inputs": {
+   "video_latent": [
+    "228",
+    0
+   ],
+   "audio_latent": [
+    "214",
+    0
+   ]
+  }
+ },
+ "228": {
+  "class_type": "EmptyLTXVLatentVideo",
+  "inputs": {
+   "width": 640,
+   "height": 360,
+   "length": 49,
+   "batch_size": 1
+  }
+ },
+ "231": {
+  "class_type": "CFGGuider",
+  "inputs": {
+   "model": [
+    "232",
+    0
+   ],
+   "positive": [
+    "239",
+    0
+   ],
+   "negative": [
+    "239",
+    1
+   ],
+   "cfg": 1.0
+  }
+ },
+ "232": {
+  "class_type": "LoraLoaderModelOnly",
+  "inputs": {
+   "model": [
+    "236",
+    0
+   ],
+   "lora_name": "ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors",
+   "strength_model": 0.5
+  }
+ },
+ "236": {
+  "class_type": "CheckpointLoaderSimple",
+  "inputs": {
+   "ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors"
+  }
+ },
+ "237": {
+  "class_type": "RandomNoise",
+  "inputs": {
+   "noise_seed": 4242
+  }
+ },
+ "239": {
+  "class_type": "LTXVConditioning",
+  "inputs": {
+   "positive": [
+    "240",
+    0
+   ],
+   "negative": [
+    "247",
+    0
+   ],
+   "frame_rate": 25.0
+  }
+ },
+ "243": {
+  "class_type": "LTXAVTextEncoderLoader",
+  "inputs": {
+   "text_encoder": "gemma_3_12B_it_fp4_mixed.safetensors",
+   "ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors",
+   "device": "default"
+  }
+ },
+ "247": {
+  "class_type": "CLIPTextEncode",
+  "inputs": {
+   "clip": [
+    "243",
+    0
+   ],
+   "text": "pc game, console game, video game, cartoon, childish, ugly"
+  }
+ },
+ "251": {
+  "class_type": "VAEDecodeTiled",
+  "inputs": {
+   "samples": [
+    "217",
+    0
+   ],
+   "vae": [
+    "236",
+    2
+   ],
+   "tile_size": 768,
+   "overlap": 64,
+   "temporal_size": 4096,
+   "temporal_overlap": 4
+  }
+ },
+ "252": {
+  "class_type": "ManualSigmas",
+  "inputs": {
+   "sigmas": "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
+  }
+ },
+ "240": {
+  "class_type": "CLIPTextEncode",
+  "inputs": {
+   "clip": [
+    "243",
+    0
+   ],
+   "text": "Dynamic cinematic close-up of high-tech modular machinery self-assembling in midair, precision robotic parts, magnetic connectors, and glowing circuits clicking together, subtle smoke and light flares, extremely detailed titanium textures. The final product displays a clean, clear surface with large glowing engraved text \u201cLTX-2.5\u201d centered and unobstructed, dramatic lighting, photorealism, 8K, sharp focus.\n"
+  }
+ },
+ "242": {
+  "class_type": "CreateVideo",
+  "inputs": {
+   "images": [
+    "251",
+    0
+   ],
+   "audio": [
+    "220",
+    0
+   ],
+   "fps": 25.0
+  }
+ },
+ "90": {
+  "class_type": "H3BenchmarkLatent",
+  "inputs": {
+   "latent": [
+    "215",
+    0
+   ],
+   "run_id": "x"
+  }
+ }
+}
