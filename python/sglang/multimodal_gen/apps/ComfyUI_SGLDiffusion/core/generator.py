@@ -9,6 +9,7 @@ import os
 import sys
 
 from ..executors.flux import FluxExecutor
+from ..executors.ltx_av import LTXAVExecutor
 from ..executors.minimax_h3 import (
     FastH3Executor,
     MiniMaxH3Executor,
@@ -182,6 +183,7 @@ def _load_executor_classes():
         MiniMaxH3Executor,
         FastH3Executor,
         VDNH3Executor,
+        LTXAVExecutor,
     ]
     try:
         from ..executors.qwen_image import QwenImageEditExecutor, QwenImageExecutor

@@ -61,6 +61,7 @@ class SGLDOptions:
                         "minimax_h3",
                         "fast_h3",
                         "vdn_h3",
+                        "ltxav",
                     ],
                     {"default": "auto-detect"},
                 ),
