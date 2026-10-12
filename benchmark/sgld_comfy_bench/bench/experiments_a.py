@@ -146,7 +146,8 @@ def _sgld_options(e, card, suite):
             opts.update(quantization="convrot_int8", dit_layerwise_offload=True)
         elif s.get("int8"):
             opts["quantization"] = "convrot_int8"
-        else:
+        elif variant == "vdn_h3":
+            # VDN's config maps "none" to BF16; left empty it would pick MXFP8 on Blackwell.
             opts["quantization"] = "none"
     par = s.get("par")
     if par:
