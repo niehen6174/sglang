@@ -217,6 +217,11 @@ class SGLDiffusionExecutor(torch.nn.Module):
         if self._ensure_runtime is not None:
             self._ensure_runtime(self)
         model_wrap = args[0] if args else kwargs["model_wrap"]
+        # A text encoder that ran after the loader would otherwise keep the
+        # worker's activation memory.
+        from .vram import free_comfy_vram
+
+        free_comfy_vram(None, keep_patcher=model_wrap.model_patcher)
         desired = model_wrap.model_patcher.model_options.get("sgld_lora_input")
         if desired != self._lora_input:
             if self._lora_input is not None:

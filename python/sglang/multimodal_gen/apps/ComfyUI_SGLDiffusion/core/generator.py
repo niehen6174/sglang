@@ -17,6 +17,7 @@ from ..executors.minimax_h3 import (
     load_fasth3_release,
 )
 from ..executors.qwen_image21 import QwenImage21Executor
+from ..executors.vram import free_comfy_vram, worker_weight_bytes
 from ..executors.zimage import ZImageExecutor
 from .preflight import check_sgld_options
 
@@ -555,6 +556,7 @@ class SGLDiffusionGenerator:
 
         pipeline_class_name = self.pipeline_class_dict[model_type]
         worker_model_path = runtime_model_path or detect_path
+        free_comfy_vram(worker_weight_bytes(worker_model_path, sgld_options))
         self.generator = self.init_generator(
             worker_model_path, pipeline_class_name, sgld_options
         )
