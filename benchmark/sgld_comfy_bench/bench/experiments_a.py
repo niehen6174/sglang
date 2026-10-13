@@ -154,8 +154,6 @@ def _sgld_options(e, card, suite):
         choice = par.split("|")
         mode = choice[0] if card in models.BIG or len(choice) == 1 else choice[1]
         opts.update(u2() if mode == "u2" else tp2())
-        if mode == "tp2" and card in models.SMALL:
-            opts["dit_layerwise_offload"] = True
     return opts
 
 
