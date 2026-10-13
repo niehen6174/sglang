@@ -207,6 +207,40 @@ _SHARED = None
 _ATEXIT_REGISTERED = False
 
 
+@contextlib.contextmanager
+def _prefer_h3_comfy_kitchen(pipeline_class_name: str):
+    """Use the faster serialized H3 INT8 kernel in RTX 5090 ComfyUI workers.
+
+    The backend is read when the worker loads its weights. Scope the default to
+    that spawn so subsequent, unrelated model loads keep their own choice.
+    An explicit backend setting always wins.
+    """
+    key = "SGLANG_DIFFUSION_CONVROT_INT8_BACKEND"
+    if pipeline_class_name != "MiniMaxH3Pipeline" or key in os.environ:
+        yield
+        return
+    try:
+        import torch
+        import comfy_kitchen  # noqa: F401 - registers the custom INT8 op
+
+        available = (
+            torch.cuda.is_available() and torch.cuda.get_device_capability() == (12, 0)
+        )
+        available = available and "RTX 5090" in torch.cuda.get_device_name()
+        available = available and hasattr(torch.ops.comfy_kitchen, "int8_linear")
+    except (ImportError, RuntimeError):
+        available = False
+    if not available:
+        yield
+        return
+    logger.info("MiniMax H3 ComfyUI: selecting comfy_kitchen INT8 backend on CC 12.0")
+    os.environ[key] = "comfy_kitchen"
+    try:
+        yield
+    finally:
+        os.environ.pop(key, None)
+
+
 class SGLDiffusionGenerator:
     """Process-wide owner of the one live SGLD worker.
 
@@ -288,7 +322,10 @@ class SGLDiffusionGenerator:
             kwargs.setdefault("model_id", _H3_MODEL_IDS[pipeline_class_name])
         kwargs = self._server_args_kwargs(kwargs)
         try:
-            with _spawn_without_launcher_main():
+            with (
+                _spawn_without_launcher_main(),
+                _prefer_h3_comfy_kitchen(pipeline_class_name),
+            ):
                 self.generator = DiffGenerator.from_pretrained(
                     model_path=model_path,
                     pipeline_class_name=pipeline_class_name,
