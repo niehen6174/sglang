@@ -52,6 +52,10 @@ def install(cls, kind):
         directory = Path(os.environ["CROSS_DIAGNOSTIC_DIR"])
         directory.mkdir(parents=True, exist_ok=True)
         inputs = (args, kwargs)
+        # Qwen fills the caller's initially empty prefix-cache dictionaries on
+        # the first step of a generation. Complete that normal operation once
+        # before fingerprinting the steady-step input, and retain its output.
+        request_output = original(self, *args, **kwargs)
         before = fingerprint(inputs)
         methods = sorted({type(m.quant_method).__name__ for m in self.modules() if hasattr(m, "quant_method")})
         report = {"kind": kind, "quant_methods": methods, "inputs": [
@@ -149,6 +153,6 @@ def install(cls, kind):
                 os.environ["SGLANG_H3_FUSED_FP32_MODULATION"] = old_fusion
             for m, a, b in packed:
                 m._int8_gate_up_packed, m._bf16_gate_up_packed = a, b
-        return original(self, *args, **kwargs)
+        return request_output
 
     cls.forward = wrapped
