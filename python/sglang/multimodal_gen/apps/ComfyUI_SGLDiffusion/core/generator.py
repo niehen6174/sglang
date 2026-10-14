@@ -213,7 +213,8 @@ def _prefer_h3_comfy_kitchen(pipeline_class_name: str):
 
     The backend is read when the worker loads its weights. Scope the default to
     that spawn so subsequent, unrelated model loads keep their own choice.
-    An explicit backend setting always wins.
+    The row-splitting default was tuned for 4090; on 5090, full matrices avoid
+    extra launches and copies. Explicit backend or row-limit settings win.
     """
     key = "SGLANG_DIFFUSION_CONVROT_INT8_BACKEND"
     if pipeline_class_name != "MiniMaxH3Pipeline" or key in os.environ:
@@ -234,11 +235,17 @@ def _prefer_h3_comfy_kitchen(pipeline_class_name: str):
         yield
         return
     logger.info("MiniMax H3 ComfyUI: selecting comfy_kitchen INT8 backend on CC 12.0")
+    rows_key = "SGLANG_KITCHEN_INT8_MAX_ROWS"
+    set_rows = rows_key not in os.environ
     os.environ[key] = "comfy_kitchen"
+    if set_rows:
+        os.environ[rows_key] = "0"
     try:
         yield
     finally:
         os.environ.pop(key, None)
+        if set_rows:
+            os.environ.pop(rows_key, None)
 
 
 class SGLDiffusionGenerator:
