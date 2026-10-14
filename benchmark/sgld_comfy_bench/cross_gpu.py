@@ -29,10 +29,14 @@ def main():
     parser.add_argument("--cases", default="")
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument("--repetitions", type=int, default=3)
+    parser.add_argument("--batch-label", default="", help="Separate follow-up results without overwriting a batch")
+    parser.add_argument("--variants", default="", help="Run only selected variants in a follow-up")
     args = parser.parse_args()
     card = args.card
-    source = Path(__file__).resolve().parents[2]
-    kit_source = Path(__file__).resolve().parent
+    source = Path(os.environ.get("CROSS_GPU_SOURCE", str(Path(__file__).resolve().parents[2])))
+    kit_source = source / "benchmark/sgld_comfy_bench"
+    label = args.batch_label or args.stage
+    assert label.replace("-", "").isalnum(), "invalid batch label"
     root = source.parent
     gpu = "1" if card == "h200" else "0"
     assert not command("nvidia-smi", "-i", gpu, "--query-compute-apps=pid", "--format=csv,noheader,nounits"), "GPU occupied"
@@ -89,7 +93,7 @@ def main():
                 "gpu_identity": command("nvidia-smi", "-i", gpu, "--query-gpu=name,uuid,driver_version", "--format=csv,noheader"),
                 "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 "hooks_sha256": hashlib.sha256((kit_source / "cross_gpu_hooks.py").read_bytes()).hexdigest()}
-    (root / f"identity-{args.stage}.json").write_text(json.dumps(identity, indent=2))
+    (root / f"identity-{label}.json").write_text(json.dumps(identity, indent=2))
     cases = [("h3-480", "h3", "minimax_h3_fl2va_pruned_int8_convrot.safetensors", "comfy_kitchen", 0),
              ("h3-768", "h3", "minimax_h3_fl2va_pruned_int8_convrot.safetensors", "comfy_kitchen", 0),
              ("h3-ref4", "h3", "minimax_h3_ref2va_pruned_int8_convrot.safetensors", "comfy_kitchen", 4),
@@ -111,8 +115,12 @@ def main():
         signal.signal(sig, interrupt)
     for name, model, unet, quant_backend, cfg_refs in cases:
         variants = ["ablation"] if args.stage == "diagnostic" else (["rows8192", "rows0", "fused"] if model == "h3" else ["old", "packed"])
+        if args.variants:
+            requested = set(args.variants.split(","))
+            assert requested <= set(variants), "unknown variant"
+            variants = [v for v in variants if v in requested]
         for variant in variants:
-            target = root / args.stage / name / variant
+            target = root / label / name / variant
             if (target / "complete.json").exists():
                 continue
             target.mkdir(parents=True, exist_ok=True)
@@ -131,7 +139,7 @@ def main():
                 env["SGLANG_DIFFUSION_CONVROT_INT8_BACKEND"] = quant_backend
             if args.stage == "diagnostic":
                 env["CROSS_DIAGNOSTIC_DIR"] = str(target / "direct")
-            settings = {"name": name, "variant": variant, "stage": args.stage, "unet": unet,
+            settings = {"name": name, "variant": variant, "stage": label, "unet": unet,
                         "attention": attention, "quant_backend_request": quant_backend or "default",
                         "env": env, "sgld_options": resolved["sgld_options"]}
             (target / "config.json").write_text(json.dumps(settings, indent=2))
@@ -164,7 +172,7 @@ def main():
                 monitor.shutdown()
             if not all(r["result"]["status"] == "success" for r in rows):
                 print(json.dumps({"case_failed": name, "variant": variant}), flush=True)
-    (root / f"finished-{args.stage}.json").write_text(json.dumps({"finished_unix": time.time(), "cases": [c[0] for c in cases]}))
+    (root / f"finished-{label}.json").write_text(json.dumps({"finished_unix": time.time(), "cases": [c[0] for c in cases]}))
 
 
 if __name__ == "__main__":
