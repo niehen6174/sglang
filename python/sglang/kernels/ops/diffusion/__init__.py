@@ -668,6 +668,8 @@ _EXPORTS: dict[str, str] = {
     "can_use_qk_rmsnorm_native": "norm.zimage_qk_rmsnorm_triton",
     "zimage_qk_rmsnorm_native": "norm.zimage_qk_rmsnorm_triton",
     # adaLN modulation, gating and timestep conditioning
+    "indexed_gate_fp32": "modulate.indexed_fp32_gate_triton",
+    "indexed_scale_shift_fp32": "modulate.indexed_fp32_scale_shift_triton",
     "indexed_gate_bf16": "modulate.indexed_modulation_triton",
     "indexed_gate_bf16_": "modulate.indexed_modulation_triton",
     "indexed_scale_shift_bf16_": "modulate.indexed_modulation_triton",

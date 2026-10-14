@@ -31,6 +31,8 @@ from sglang.kernels.ops.diffusion import (
     fused_qknorm_rope_out_of_place,
     indexed_gate_bf16,
     indexed_gate_bf16_,
+    indexed_gate_fp32,
+    indexed_scale_shift_fp32,
     indexed_scale_shift_bf16_,
     indexed_scale_shift_mxfp8_,
     mark_minimax_h3_norm_modulate_site,
@@ -434,6 +436,18 @@ def _modulate_scale_shift(
     """Apply indexed affine modulation, reusing disposable CUDA BF16 input."""
     # Apply per-index affine modulation: x * (1 + scale[idx]) + shift[idx].
     if (
+        os.getenv("SGLANG_H3_FUSED_FP32_MODULATION") == "1"
+        and current_platform.is_cuda()
+        and x.is_cuda
+        and x.ndim == 2
+        and x.dtype == dtype == _BF16_DTYPE
+        and shift.dtype == scale.dtype == _FP32_DTYPE
+        and x.is_contiguous()
+        and indices.is_contiguous()
+        and shift.stride(-1) == scale.stride(-1) == 1
+    ):
+        return indexed_scale_shift_fp32(x, shift, scale, indices)
+    if (
         x.is_cuda
         and x.dtype == _BF16_DTYPE
         and dtype == _BF16_DTYPE
@@ -458,6 +472,24 @@ def _modulate_gate(
 ) -> torch.Tensor:
     """Apply an indexed gated residual, optionally reusing the input buffer."""
     # Apply the per-index gated residual: x + gate[idx] * other.
+    # Serialized INT8 H3 keeps AdaLN gates in FP32. The BF16 kernel below
+    # deliberately rounds the product to BF16, so it cannot handle this path.
+    if (
+        (
+            os.getenv("SGLANG_H3_FUSED_FP32_MODULATION") == "1"
+            or os.getenv("SGLANG_H3_FUSED_FP32_GATE") == "1"
+        )
+        and current_platform.is_cuda()
+        and x.is_cuda
+        and x.ndim == 2
+        and x.dtype == other.dtype == dtype == _BF16_DTYPE
+        and gate.dtype == _FP32_DTYPE
+        and x.is_contiguous()
+        and other.is_contiguous()
+        and indices.is_contiguous()
+        and gate.stride(-1) == 1
+    ):
+        return indexed_gate_fp32(x, gate, other, indices, allow_inplace=allow_inplace)
     if (
         x.is_cuda
         and x.dtype == _BF16_DTYPE
