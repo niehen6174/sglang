@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+import os
 
 import torch
 from torch import nn
@@ -343,7 +344,147 @@ class QwenImage21FeedForward(nn.Module):
             prefix=f"{prefix}.out",
         )
 
+    def pack_int8_gate_up(self):
+        """Share serialized gate/up storage for the optional single-GPU path."""
+        if os.getenv("SGLANG_QWEN21_PACKED_BF16_MLP") == "1":
+            gate, up = self.gate_layer, self.proj
+            if (
+                all(
+                    type(layer) is ColumnParallelLinear
+                    and layer.tp_size == 1
+                    and type(layer.quant_method) is UnquantizedLinearMethod
+                    and layer.bias is None
+                    and layer.weight.is_cuda
+                    and layer.weight.dtype == torch.bfloat16
+                    and layer.weight.dim() == 2
+                    for layer in (gate, up)
+                )
+                and gate.weight.shape == up.weight.shape
+            ):
+                rows = gate.weight.shape[0]
+                packed = torch.cat((gate.weight.data, up.weight.data), dim=0)
+                gate.weight.data, up.weight.data = packed[:rows], packed[rows:]
+                self._bf16_gate_up_packed = True
+        if os.getenv("SGLANG_QWEN21_FUSED_INT8_MLP") != "1":
+            return
+        layers = (self.gate_layer, self.proj, self.out)
+        if not all(
+            type(layer) in (ColumnParallelLinear, RowParallelLinear)
+            and layer.tp_size == 1
+            and type(layer.quant_method).__name__
+            == "ConvRotInt8ComfyKitchenLinearMethod"
+            and layer.quant_method.is_checkpoint_serialized
+            and layer.bias is None
+            and layer.weight.is_cuda
+            and layer.weight.dtype == torch.int8
+            and layer.weight.dim() == 2
+            for layer in layers
+        ):
+            return
+        gate, up = layers[:2]
+        if gate.weight.shape != up.weight.shape:
+            return
+        if gate.quant_method.group_size != up.quant_method.group_size:
+            return
+        for name in ("weight", "weight_scale"):
+            a, b = getattr(gate, name), getattr(up, name)
+            if a.shape != b.shape or a.shape[0] != gate.weight.shape[0]:
+                return
+        # Preserve parameter names and avoid a second persistent weight copy.
+        for name in ("weight", "weight_scale"):
+            a, b = getattr(gate, name), getattr(up, name)
+            packed = torch.cat((a.data, b.data), dim=0)
+            a.data, b.data = packed[: a.shape[0]], packed[a.shape[0] :]
+        self._int8_gate_up_packed = True
+
+    def _fused_int8_forward(self, x):
+        if not getattr(self, "_int8_gate_up_packed", False):
+            return None
+        if torch.compiler.is_compiling() or not x.is_cuda or x.dtype != torch.bfloat16:
+            return None
+        gate, up, out = self.gate_layer, self.proj, self.out
+        # Wrappers (including LoRA) and offload must retain their own forwards.
+        if not (
+            type(gate) is ColumnParallelLinear
+            and type(up) is ColumnParallelLinear
+            and type(out) is RowParallelLinear
+            and gate.weight.dim() == 2
+            and gate.weight.dtype == torch.int8
+            and up.weight.shape == gate.weight.shape
+            and out.weight.dim() == 2
+            and out.weight.dtype == torch.int8
+            and out.weight.is_cuda
+        ):
+            return None
+        views = []
+        for name in ("weight", "weight_scale"):
+            a, b = getattr(gate, name), getattr(up, name)
+            if not (
+                a.is_cuda
+                and b.is_cuda
+                and a.is_contiguous()
+                and b.is_contiguous()
+                and a.untyped_storage().data_ptr() == b.untyped_storage().data_ptr()
+                and b.storage_offset() == a.storage_offset() + a.numel()
+            ):
+                return None
+            views.append(a.as_strided((2 * a.shape[0], *a.shape[1:]), a.stride()))
+        import comfy_kitchen
+
+        gate_up = comfy_kitchen.int8_linear(
+            x,
+            views[0],
+            views[1],
+            None,
+            x.dtype,
+            convrot=True,
+            convrot_groupsize=gate.quant_method.group_size,
+        )
+        return comfy_kitchen.int8_linear(
+            gate_up,
+            out.weight,
+            out.weight_scale,
+            None,
+            x.dtype,
+            convrot=True,
+            convrot_groupsize=out.quant_method.group_size,
+            input_act="swiglu",
+        )
+
     def forward(self, x):
+        if (
+            getattr(self, "_bf16_gate_up_packed", False)
+            and not torch.compiler.is_compiling()
+        ):
+            gate, up = self.gate_layer, self.proj
+            if (
+                type(gate) is ColumnParallelLinear
+                and type(up) is ColumnParallelLinear
+                and x.is_cuda
+                and x.dtype == torch.bfloat16
+                and x.dim() == 3
+                and gate.weight.is_cuda
+                and gate.weight.dim() == 2
+                and gate.weight.dtype == torch.bfloat16
+                and up.weight.shape == gate.weight.shape
+                and gate.weight.is_contiguous()
+                and up.weight.is_contiguous()
+                and gate.weight.untyped_storage().data_ptr()
+                == up.weight.untyped_storage().data_ptr()
+                and up.weight.storage_offset()
+                == gate.weight.storage_offset() + gate.weight.numel()
+            ):
+                from sglang.kernels.ops.diffusion.activation.silu_mul_bitexact import (
+                    fused_packed_silu_mul_bitexact,
+                )
+
+                w = gate.weight
+                packed = w.as_strided((2 * w.shape[0], w.shape[1]), w.stride())
+                hidden = nn.functional.linear(x, packed)
+                return self.out(fused_packed_silu_mul_bitexact(hidden))[0]
+        fused_output = self._fused_int8_forward(x)
+        if fused_output is not None:
+            return fused_output
         gate, value = self.gate_layer(x)[0], self.proj(x)[0]
         fused = None
         if (
@@ -917,6 +1058,16 @@ class QwenImage21Transformer2DModel(CachableDiT, LayerwiseOffloadableModuleMixin
         super().post_load_weights()
         for block in self.transformer_blocks:
             block.attn.pack_qkv_weights()
+            block.img_mlp.pack_int8_gate_up()
+        if os.getenv("SGLANG_QWEN21_FUSED_INT8_MLP") == "1":
+            logger.info(
+                "Qwen INT8 MLP: packed %d/%d gate/up projections",
+                sum(
+                    getattr(b.img_mlp, "_int8_gate_up_packed", False)
+                    for b in self.transformer_blocks
+                ),
+                len(self.transformer_blocks),
+            )
 
     def prepare_lora_adapter(self, adapter):
         return _split_fused_gate_up_lora(
