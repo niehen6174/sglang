@@ -220,7 +220,24 @@ LTX_PROMPT = graphs.LTX_PROMPT
 
 
 def _refs(n):
-    return [pathlib.Path(os.environ["COMFY_DIR"]) / "input" / f for f in graphs.ref_images(n)]
+    """Reference images pre-resized the way SGLang encodes them (2048 px short edge, LANCZOS,
+    nearest 32 px). vllm-omni keeps an uploaded image's own size, so both engines then encode
+    the same pixels."""
+    from PIL import Image
+
+    src_dir = pathlib.Path(os.environ["COMFY_DIR"]) / "input"
+    out_dir = pathlib.Path(os.environ["TMPDIR"]) / "ref2048"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = []
+    for name in graphs.ref_images(n):
+        dst = out_dir / (pathlib.Path(name).stem + ".png")
+        if not dst.exists():
+            img = Image.open(src_dir / name).convert("RGB")
+            scale = 2048 / min(img.size)
+            size = tuple(max(32, round(v * scale / 32) * 32) for v in img.size)
+            img.resize(size, Image.Resampling.LANCZOS).save(dst)
+        out.append(dst)
+    return out
 
 
 def request(engine, e, steps, seed):
@@ -259,7 +276,10 @@ def request(engine, e, steps, seed):
               "num_inference_steps": n_steps,
               "flow_shift": 12.0, "seed": seed,
               "extra_params": json.dumps({"task": task, "duration": round((c["frames"] - 4) / 24.0, 3), "audio_flow_shift": 3.0})}
-    return "multipart", "/v1/videos", ({k: str(v) for k, v in fields.items()}, [("input_reference", p) for p in _refs(refs)])
+    # One image goes in input_reference; several must use the list field input_references
+    # (a repeated single-value field binds only its last value).
+    field = "input_references" if refs > 1 else "input_reference"
+    return "multipart", "/v1/videos", ({k: str(v) for k, v in fields.items()}, [(field, p) for p in _refs(refs)])
 
 
 def _multipart(fields, files):
