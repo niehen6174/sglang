@@ -47,6 +47,9 @@ def _processes(handle):
 class GpuMonitor:
     def __init__(self):
         pynvml.nvmlInit()
+        # Page-table sampling can block CUDA IPC reference-counter mappings.
+        # Measure host memory in a separate run, explicitly enabled by the caller.
+        self.sample_host_memory = os.getenv("H3_BENCH_SAMPLE_HOST_MEMORY", "0") == "1"
         self.entries = visible_gpu_entries()
         self.handles = [_handle(e) for e in self.entries]
         self.identity = [
@@ -103,7 +106,7 @@ class GpuMonitor:
             while not stop.is_set():
                 gpu = self.sample(start)
                 samples.append(gpu)
-                if session_pid and gpu["seconds"] >= next_host:
+                if self.sample_host_memory and session_pid and gpu["seconds"] >= next_host:
                     host = sample_host_tree(session_pid, gpu["seconds"])
                     host["gpu_gib"] = round(gpu["used_gib"], 3)
                     host_samples.append(host)

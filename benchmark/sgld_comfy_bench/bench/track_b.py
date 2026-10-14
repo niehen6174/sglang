@@ -464,7 +464,8 @@ def run_experiment(e, engine, card, suite, gpus, port, timeout, commits, max_run
             summary[key] = {"median": statistics.median(vals), "min": min(vals), "max": max(vals)}
     if ok:
         summary["peak_vram_gib"] = {k: max(r["peak_vram_gib"][k] for r in ok) for k in ok[0]["peak_vram_gib"]}
-        summary["peak_rss_gib"] = max((r.get("peak_host_pss_gib") or 0) for r in ok)
+        host_peaks_measured = [r["peak_host_pss_gib"] for r in ok if r.get("peak_host_pss_gib") is not None]
+        summary["peak_rss_gib"] = max(host_peaks_measured, default=None)
     _append(suite, summary)
 
 

@@ -186,6 +186,7 @@ def run_prompt(srv, graph, run_id, monitor, timeout, keep_media=False):
     gpu_samples, host_samples = finish()
     res.update(GpuMonitor.peaks(gpu_samples))
     res["peak_vram_gib"] = {k: round(v - srv.baseline.get(k, 0.0), 2) for k, v in res["peak_gpu_gib_by_nvml_index"].items()}
+    res["host_memory_sampled"] = monitor.sample_host_memory
     res.update(host_peaks(host_samples))
     res.update(usage_summary(gpu_samples))
     write_usage(out / "usage.csv", gpu_samples)
