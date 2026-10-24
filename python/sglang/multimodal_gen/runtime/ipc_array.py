@@ -25,12 +25,62 @@ class NumpyArrayFileRef:
 
     def materialize(self) -> np.ndarray:
         try:
+            if _can_map_spilled_array(self.path):
+                try:
+                    # The producer has already written the complete array.
+                    # Keep that storage instead of copying the full payload
+                    # into another host allocation. POSIX keeps the mapping
+                    # alive after unlink. This is a private, single-consumer
+                    # spill, so a writable shared mapping avoids COW copies
+                    # if the receiver modifies the returned array in place.
+                    mapped = np.load(self.path, allow_pickle=False, mmap_mode="r+")
+                    return np.asarray(mapped)
+                except (OSError, ValueError):
+                    # Read-only spills and empty payloads can still use the
+                    # ordinary loader, which also validates malformed files.
+                    pass
             return np.load(self.path, allow_pickle=False)
         finally:
             try:
                 os.unlink(self.path)
             except FileNotFoundError:
                 pass
+
+
+def _can_map_spilled_array(path: str) -> bool:
+    if os.name != "posix":
+        return False
+    try:
+        size = os.stat(path).st_size
+        capacity = os.statvfs(os.path.dirname(path) or ".")
+    except OSError:
+        return False
+    # Unlike an eager copy, an unlinked mapping holds spill space until the
+    # last result view is released. Under pressure, copy and unlink now so
+    # retained results put less pressure on later replies' spill space.
+    available = capacity.f_bavail * capacity.f_frsize
+    return (
+        size >= _MIN_FILE_REF_BYTES
+        and available >= 2 * size
+        and _has_mapping_fd_headroom()
+    )
+
+
+def _has_mapping_fd_headroom() -> bool:
+    try:
+        import resource
+
+        limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+        if limit == resource.RLIM_INFINITY:
+            return True
+        directory = "/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"
+        with os.scandir(directory) as descriptors:
+            used = sum(1 for _ in descriptors)
+        # Retained mappings keep an FD alive. Leave room for loading the next
+        # response, sockets and logs; the eager path closes its FD immediately.
+        return limit - used >= 16
+    except (ImportError, OSError, ValueError):
+        return False
 
 
 @dataclass
