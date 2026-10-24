@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-24",
+  "source_commit": "49933325cca5cfa32e03e06843774fa70fec64b5",
+  "scope": "Instrumented same-SGLang deployment controls; no universal speed or strict equal-quality cross-engine claim.",
+  "limits": [
+    "Fixed order, three formal samples, unlocked clocks.",
+    "Full model checkpoint payload hashes were not verified by this diagnostic.",
+    "H3 raw sample dtype/layout changes under the explicit CPU-frame return contract."
+  ],
+  "h3": {
+    "gpu": "NVIDIA H200, single GPU",
+    "warmup_requests": 1,
+    "warmup_steps": 2,
+    "formal_requests": 3,
+    "formal_steps": 50,
+    "primary": "generation_to_host_media_wall",
+    "common_codec_outside_primary": true,
+    "output": {
+      "width": 1344,
+      "height": 768,
+      "frames": 124,
+      "fps": 24,
+      "audio_sample_rate": 32000,
+      "audio_channels": 2
+    },
+    "reference": {
+      "image_size": [
+        1024,
+        1024
+      ],
+      "tokens": 1024,
+      "image_file_sha256": "4c90ebc2d68610b3f75d50ded9d4cbc1fa8ad9677762fe8cc3f180cc3aa4e141"
+    },
+    "profiles": [
+      {
+        "variant": "native",
+        "formal_seconds": [
+          303.9553641779348,
+          304.6326360160019,
+          305.41265770979226
+        ],
+        "mean_seconds": 304.66688596790965,
+        "sample_stdev_seconds": 0.7292502340778769,
+        "formal_common_mp4_sha256": [
+          "1e49c364b2bd7078391d51e8d1e087ae701b14260e67dd100cb0fe41e91124a2",
+          "1e49c364b2bd7078391d51e8d1e087ae701b14260e67dd100cb0fe41e91124a2",
+          "1e49c364b2bd7078391d51e8d1e087ae701b14260e67dd100cb0fe41e91124a2"
+        ]
+      },
+      {
+        "variant": "gpu-uint8",
+        "formal_seconds": [
+          302.48960695602,
+          303.14716133498587,
+          303.0113655058667
+        ],
+        "mean_seconds": 302.8827112656242,
+        "sample_stdev_seconds": 0.34714316279250246,
+        "formal_common_mp4_sha256": [
+          "1e49c364b2bd7078391d51e8d1e087ae701b14260e67dd100cb0fe41e91124a2",
+          "1e49c364b2bd7078391d51e8d1e087ae701b14260e67dd100cb0fe41e91124a2",
+          "1e49c364b2bd7078391d51e8d1e087ae701b14260e67dd100cb0fe41e91124a2"
+        ]
+      }
+    ],
+    "mean_reduction_seconds": 1.7841747022854406,
+    "full_cpu_array_byte_equality_coverage": "Warmup and first formal video and audio only; later formal checks compare common MP4 bytes."
+  },
+  "configuration_validation": {
+    "source_commit": "49933325cca5cfa32e03e06843774fa70fec64b5",
+    "checked": [
+      {
+        "profile": "h3-ref2va-cpu-frames",
+        "baseline": true,
+        "sampling_type": "MiniMaxH3SamplingParams",
+        "native_schema_accepted": true,
+        "policy": null
+      },
+      {
+        "profile": "h3-ref2va-cpu-frames",
+        "baseline": false,
+        "sampling_type": "MiniMaxH3SamplingParams",
+        "native_schema_accepted": true,
+        "policy": null
+      }
+    ],
+    "gpu_generations": 0,
+    "scope": "Recorded native schema validation of the equivalent original combined profile; the split CLI has CPU checks only, with no new GPU generations."
+  }
+}
