@@ -128,6 +128,14 @@ def build_component_residency_strategy(
     return ResidentStrategy()
 
 
+@dataclass
+class SnapshotCacheRelease:
+    """One forward's allocator-cache lease, captured before asynchronous finalize."""
+
+    allowed: bool
+    pending: bool = False
+
+
 class ComponentResidencyManager:
     """Coordinate component placement over a sequential request timeline."""
 
@@ -137,6 +145,7 @@ class ComponentResidencyManager:
         self.pipeline = pipeline
         self.server_args = server_args
         self.state = ResidencyState()
+        self._snapshot_cache_release_request: SnapshotCacheRelease | None = None
         self._host_pin_budget: HostPinBudget | None = None
         self._stage_names_by_id: dict[int, str] = {}
         self._stage_uses_by_index: list[tuple[ComponentUse, ...]] = []
@@ -162,6 +171,26 @@ class ComponentResidencyManager:
         # phase key -> peak allocated bytes
         self._warmup_phase_peaks: dict[str, int] = {}
         self._completed_warmup_phase_peaks: dict[str, int] = {}
+
+    @contextmanager
+    def snapshot_cache_release(
+        self, *, defer_to_idle: bool
+    ) -> Iterator[SnapshotCacheRelease]:
+        """Scope cache reuse to a forward whose worker can reclaim it at idle.
+
+        Finalizers capture this token's pending value, never a later request's
+        manager state. Memory-first and schedulers without an idle callback keep
+        the existing eager release policy.
+        """
+        previous = self._snapshot_cache_release_request
+        release = SnapshotCacheRelease(
+            allowed=defer_to_idle and self.server_args.performance_mode != "memory"
+        )
+        self._snapshot_cache_release_request = release
+        try:
+            yield release
+        finally:
+            self._snapshot_cache_release_request = previous
 
     @property
     def host_pin_budget(self) -> HostPinBudget:
@@ -943,6 +972,18 @@ class ComponentResidencyManager:
             released_device_storage and not current_platform.is_npu()
         )
         if not (should_empty_component_cache or released_layerwise_storage):
+            return
+        release = self._snapshot_cache_release_request
+        if (
+            release is not None
+            and release.allowed
+            and released_device_storage
+            and isinstance(strategy, SnapshotOffloadStrategy)
+            and not released_layerwise_storage
+            and current_platform.is_cuda()
+            and not current_platform.device_shares_host_memory()
+        ):
+            release.pending = True
             return
         if not torch.get_device_module().is_available():
             return

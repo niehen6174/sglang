@@ -39,7 +39,7 @@ def worker(monkeypatch):
     return worker, releases, clock
 
 
-def _finish_request(worker, *, deferred=False):
+def _finish_request(worker, *, deferred=False, output=None, pending=False):
     req = SimpleNamespace(
         request_id="request",
         perf_dump_path=None,
@@ -48,11 +48,12 @@ def _finish_request(worker, *, deferred=False):
         return_raw_frames=False,
     )
     worker._finalize_output_batch(
-        output_batch=OutputBatch(),
+        output_batch=OutputBatch(output=output),
         req=req,
         save_output_paths=lambda batch: None,
         output_metrics=[],
         deferred=deferred,
+        snapshot_cache_release_pending=pending,
     )
 
 
@@ -87,3 +88,32 @@ def test_without_an_idle_hook_each_request_still_releases(worker):
     assert releases == [clock.now]
     worker.release_cache_if_idle()
     assert releases == [clock.now]
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_array_output_with_snapshot_pending_releases_at_idle(worker, deferred):
+    worker, releases, clock = worker
+    worker.defer_cache_release = True
+    _finish_request(worker, deferred=deferred, output=[object()], pending=True)
+    assert (
+        worker._cache_release_due == clock.now + gpu_worker_module._IDLE_CACHE_RELEASE_S
+    )
+    worker.release_cache_if_idle()
+    assert releases == []
+    clock.now += gpu_worker_module._IDLE_CACHE_RELEASE_S
+    worker.release_cache_if_idle()
+    worker.release_cache_if_idle()
+    assert releases == [clock.now]
+    assert worker._cache_release_due is None
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_array_output_without_snapshot_pending_preserves_existing_policy(
+    worker, deferred
+):
+    worker, releases, clock = worker
+    worker.defer_cache_release = True
+    _finish_request(worker, deferred=deferred, output=[object()])
+    assert worker._cache_release_due is None
+    worker.release_cache_if_idle()
+    assert releases == []
