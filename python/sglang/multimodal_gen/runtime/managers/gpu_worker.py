@@ -690,6 +690,7 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
         """
         output_batch = None
         forward_failed = False
+        snapshot_cache_release = None
         # A closure left behind by an aborted dispatch must not pair with this
         # request's output.
         self._deferred_finalize = None
@@ -749,6 +750,20 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
             for item in log_reqs:
                 item.log(server_args=self.server_args)
             with ExitStack() as stack:
+                residency_manager = getattr(
+                    self.pipeline, "component_residency_manager", None
+                )
+                if residency_manager is not None:
+                    snapshot_cache_release = stack.enter_context(
+                        residency_manager.snapshot_cache_release(
+                            defer_to_idle=(
+                                self.defer_cache_release
+                                and not req.is_warmup
+                                and not req.return_raw_frames
+                                and not return_req
+                            )
+                        )
+                    )
                 for item in log_reqs:
                     stack.enter_context(
                         trace_slice(item.trace_ctx, DiffStage.GPU_FORWARD)
@@ -786,6 +801,10 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
                     save_output_paths=save_output_paths,
                     output_metrics=output_metrics,
                     done_event=done_event,
+                    snapshot_cache_release_pending=bool(
+                        snapshot_cache_release is not None
+                        and snapshot_cache_release.pending
+                    ),
                 )
             else:
                 self._finalize_output_batch(
@@ -794,6 +813,10 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
                     save_output_paths=save_output_paths,
                     output_metrics=output_metrics,
                     deferred=False,
+                    snapshot_cache_release_pending=bool(
+                        snapshot_cache_release is not None
+                        and snapshot_cache_release.pending
+                    ),
                 )
         except Exception as e:
             if propagate_forward_errors and forward_failed:
@@ -815,7 +838,16 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
             # clean cache if OOM
             if not current_platform.is_cpu():
                 torch.get_device_module().empty_cache()
+                if snapshot_cache_release is not None:
+                    snapshot_cache_release.pending = False
         finally:
+            if (
+                forward_failed
+                and snapshot_cache_release is not None
+                and snapshot_cache_release.pending
+            ):
+                # A propagated forward failure bypasses normal finalization.
+                self._cache_release_due = time.monotonic() + _IDLE_CACHE_RELEASE_S
             # also runs on the propagate_forward_errors re-raise: a warmup
             # forward that never completed must still leave a failed record,
             # or the estimator would plan from the remaining partial data
@@ -836,6 +868,7 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
         save_output_paths: Callable[[OutputBatch], None],
         output_metrics: list[Any],
         deferred: bool,
+        snapshot_cache_release_pending: bool = False,
     ) -> None:
         req_label = req.request_id[:8] if req.request_id else "unnamed"
         with maybe_record_function(f"SAVE_OUTPUTS {req_label}"):
@@ -863,7 +896,7 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
 
         if (
             not current_platform.is_cpu()
-            and output_batch.output is None
+            and (output_batch.output is None or snapshot_cache_release_pending)
             and not req.return_raw_frames
         ):
             if self.defer_cache_release:
@@ -902,28 +935,37 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
         save_output_paths: Callable[[OutputBatch], None],
         output_metrics: list[Any],
         done_event: Any,
+        snapshot_cache_release_pending: bool = False,
     ) -> None:
         """Runs on the scheduler's finalize thread, never on the event loop."""
         # A dedicated stream, ordered after the producing forward via done_event,
         # keeps the D2H copies and uint8 conversions off the next request's
         # compute stream.
-        device_module = torch.get_device_module()
-        # CUDA's current device is thread-local; executor threads do not inherit
-        # the worker's device selection.
-        with device_module.device(self.local_rank):
-            if self._deferred_save_stream is None:
-                self._deferred_save_stream = device_module.Stream()
-            stream = self._deferred_save_stream
-            stream.wait_event(done_event)
-            with device_module.stream(stream):
-                self._finalize_output_batch(
-                    output_batch=output_batch,
-                    req=req,
-                    save_output_paths=save_output_paths,
-                    output_metrics=output_metrics,
-                    deferred=True,
-                )
-            stream.synchronize()
+        try:
+            device_module = torch.get_device_module()
+            # CUDA's current device is thread-local; executor threads do not inherit
+            # the worker's device selection.
+            with device_module.device(self.local_rank):
+                if self._deferred_save_stream is None:
+                    self._deferred_save_stream = device_module.Stream()
+                stream = self._deferred_save_stream
+                stream.wait_event(done_event)
+                with device_module.stream(stream):
+                    self._finalize_output_batch(
+                        output_batch=output_batch,
+                        req=req,
+                        save_output_paths=save_output_paths,
+                        output_metrics=output_metrics,
+                        deferred=True,
+                        snapshot_cache_release_pending=snapshot_cache_release_pending,
+                    )
+                stream.synchronize()
+        finally:
+            if snapshot_cache_release_pending and self.defer_cache_release:
+                # Output transport/save can fail before normal finalization
+                # schedules reclamation. The scheduler still waits for all
+                # in-flight finalizers before running the idle callback.
+                self._cache_release_due = time.monotonic() + _IDLE_CACHE_RELEASE_S
 
     def release_cache_if_idle(self) -> None:
         """Release the allocator cache once no request has finished for a while.

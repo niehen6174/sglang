@@ -13,6 +13,7 @@ import torch
 
 from sglang.multimodal_gen.configs.sample.sampling_params import SamplingParams
 from sglang.multimodal_gen.runtime.entrypoints.utils import _sample_to_uint8_frames
+from sglang.multimodal_gen.runtime.managers import gpu_worker as gpu_worker_module
 from sglang.multimodal_gen.runtime.managers.gpu_worker import GPUWorker
 from sglang.multimodal_gen.runtime.managers.scheduler import Scheduler, _DeferredOutput
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch, Req
@@ -23,7 +24,10 @@ def _req():
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_finalize_selects_worker_device_and_restores_thread_device(monkeypatch, fail):
+@pytest.mark.parametrize("pending", [False, True])
+def test_finalize_selects_worker_device_and_restores_thread_device(
+    monkeypatch, fail, pending
+):
     current_device = 0
     stream = Mock()
 
@@ -54,10 +58,14 @@ def test_finalize_selects_worker_device_and_restores_thread_device(monkeypatch, 
     worker = GPUWorker.__new__(GPUWorker)
     worker.local_rank = 1
     worker._deferred_save_stream = None
+    worker.defer_cache_release = True
+    worker._cache_release_due = None
+    monkeypatch.setattr(gpu_worker_module.time, "monotonic", lambda: 100.0)
     done_event = object()
 
     def finalize(**kwargs):
         assert current_device == 1
+        assert kwargs["snapshot_cache_release_pending"] is pending
         stream.wait_event.assert_called_with(done_event)
         if fail:
             raise OSError("save failed")
@@ -71,12 +79,19 @@ def test_finalize_selects_worker_device_and_restores_thread_device(monkeypatch, 
                 save_output_paths=lambda _: None,
                 output_metrics=[],
                 done_event=done_event,
+                snapshot_cache_release_pending=pending,
             )
         except OSError:
             assert fail
         else:
             assert not fail
         assert current_device == 0
+        # Even a failed save must return the per-request allocator lease to
+        # the existing idle callback, without flushing an unrelated request.
+        expected_due = (
+            100.0 + gpu_worker_module._IDLE_CACHE_RELEASE_S if pending else None
+        )
+        assert worker._cache_release_due == expected_due
     device_module.Stream.assert_called_once()
 
 

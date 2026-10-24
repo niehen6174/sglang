@@ -1275,3 +1275,114 @@ def test_stage_exit_does_not_keep_unused_same_stage_expert(
     assert finished == expected_finished
     assert strategy.prefetch_for_use.call_args.args[1].component_name == "vae"
     assert manager._use_key(uses["transformer_2"]) not in manager._prefetched_use_keys
+
+
+@pytest.fixture
+def snapshot_cache_manager(monkeypatch):
+    from sglang.multimodal_gen.runtime.managers.memory_managers import component_manager
+
+    args = _server_args()
+    args.performance_mode = "manual"
+    manager = ComponentResidencyManager(
+        SimpleNamespace(
+            modules={}, _stage_name_mapping={}, component_residency_strategies={}
+        ),
+        args,
+    )
+    releases = []
+    monkeypatch.setattr(manager, "_keep_ready_component_on_cuda", lambda: False)
+    monkeypatch.setattr(manager, "_module_on_supported_device", lambda _: False)
+    monkeypatch.setattr(
+        component_manager,
+        "current_platform",
+        SimpleNamespace(
+            is_cuda=lambda: True,
+            is_npu=lambda: False,
+            device_shares_host_memory=lambda: False,
+        ),
+    )
+    monkeypatch.setattr(
+        component_manager.torch,
+        "get_device_module",
+        lambda: SimpleNamespace(
+            is_available=lambda: True, empty_cache=lambda: releases.append(True)
+        ),
+    )
+    return manager, releases
+
+
+def _release_snapshot_cache(manager, *, strategy=None, was_on_device=True):
+    manager._empty_cache_after_large_release(
+        ComponentUse("DiT", "transformer", memory_intensive=True),
+        SnapshotOffloadStrategy() if strategy is None else strategy,
+        torch.nn.Linear(1, 1),
+        was_on_device,
+    )
+
+
+def test_snapshot_cache_release_scope_tracks_only_actual_release(
+    snapshot_cache_manager,
+):
+    manager, releases = snapshot_cache_manager
+    with manager.snapshot_cache_release(defer_to_idle=True) as token:
+        _release_snapshot_cache(manager, was_on_device=False)
+        assert not token.pending
+        _release_snapshot_cache(manager)
+        assert token.pending
+        assert releases == []
+    assert manager._snapshot_cache_release_request is None
+
+
+@pytest.mark.parametrize("mode,defer", [("memory", True), ("manual", False)])
+def test_snapshot_cache_preserves_memory_and_noidle_policy(
+    snapshot_cache_manager, mode, defer
+):
+    manager, releases = snapshot_cache_manager
+    manager.server_args.performance_mode = mode
+    with manager.snapshot_cache_release(defer_to_idle=defer) as token:
+        _release_snapshot_cache(manager)
+        assert not token.pending
+    assert releases == [True]
+
+
+@pytest.mark.parametrize("kind", ["shared-pool", "layerwise", "component", "non-cuda"])
+def test_snapshot_cache_does_not_change_other_release_modes(
+    snapshot_cache_manager, monkeypatch, kind
+):
+    from sglang.multimodal_gen.runtime.managers.memory_managers import component_manager
+
+    manager, releases = snapshot_cache_manager
+    strategy = SnapshotOffloadStrategy()
+    if kind == "shared-pool":
+        monkeypatch.setattr(
+            component_manager.current_platform,
+            "device_shares_host_memory",
+            lambda: True,
+        )
+    elif kind == "non-cuda":
+        monkeypatch.setattr(
+            component_manager.current_platform, "is_cuda", lambda: False
+        )
+    elif kind == "layerwise":
+        strategy = residency_strategies.LayerwiseOffloadStrategy.__new__(
+            residency_strategies.LayerwiseOffloadStrategy
+        )
+    elif kind == "component":
+        strategy = ComponentOffloadStrategy()
+    with manager.snapshot_cache_release(defer_to_idle=True) as token:
+        _release_snapshot_cache(manager, strategy=strategy)
+        assert not token.pending
+    assert releases == [True]
+
+
+def test_nested_snapshot_cache_scope_restores_previous_owner(snapshot_cache_manager):
+    manager, releases = snapshot_cache_manager
+    with manager.snapshot_cache_release(defer_to_idle=True) as outer:
+        with manager.snapshot_cache_release(defer_to_idle=False) as inner:
+            _release_snapshot_cache(manager)
+            assert not inner.pending
+        assert manager._snapshot_cache_release_request is outer
+        _release_snapshot_cache(manager)
+        assert outer.pending
+    assert releases == [True]
+    assert manager._snapshot_cache_release_request is None
