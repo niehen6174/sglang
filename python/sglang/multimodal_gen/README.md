@@ -96,6 +96,12 @@ groups override `all`. Existing options such as `--dit-cpu-offload`,
 [CLI reference](https://docs.sglang.io/docs/sglang-diffusion/api/cli#component-residency)
 for precedence and compatibility details.
 
+For measured, explicit H3 CPU-frame delivery and MOSS SFT snapshot-offload
+configurations, see the [opt-in performance profiles](../../../examples/usage/diffusion_perf_profiles/README.md).
+The examples print their configurations before you opt in to generation and
+include baseline comparisons and output-equivalence coverage. They preserve
+the default file-only and raw-sample return contracts.
+
 ### LoRA support
 
 Apply LoRA adapters via `--lora-path`:
