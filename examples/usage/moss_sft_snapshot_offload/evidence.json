@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-24",
+  "source_commit": "49933325cca5cfa32e03e06843774fa70fec64b5",
+  "scope": "Instrumented same-SGLang deployment controls; no universal speed or strict equal-quality cross-engine claim.",
+  "limits": [
+    "Fixed order, three formal samples, unlocked clocks.",
+    "Full model checkpoint payload hashes were not verified by this diagnostic.",
+    "MOSS retains host-side tail variance; snapshots consume additional CPU and pinned memory."
+  ],
+  "moss_sft_photo": {
+    "gpu": "NVIDIA GeForce RTX 5090, 32GB, single GPU",
+    "warmup_requests": 1,
+    "warmup_steps": 50,
+    "formal_requests": 3,
+    "formal_steps": 50,
+    "actual_dit_forwards_per_request": 100,
+    "primary": "generation_to_host_rgba_wall",
+    "common_png_outside_primary": true,
+    "output": {
+      "width": 1024,
+      "height": 1024,
+      "channels": 4
+    },
+    "profiles": [
+      {
+        "variant": "component-offload",
+        "formal_seconds": [
+          24.404458503006026,
+          24.492460437002592,
+          27.29000261006877
+        ],
+        "mean_seconds": 25.395640516692463,
+        "sample_stdev_seconds": 1.6411556570638204,
+        "common_png_sha256": {
+          "formal-000": "11bdffb2b0cbe677e2f3fa87e0752e468cbf65200fe750ac927067da94f7bfdd",
+          "formal-001": "11bdffb2b0cbe677e2f3fa87e0752e468cbf65200fe750ac927067da94f7bfdd",
+          "formal-002": "11bdffb2b0cbe677e2f3fa87e0752e468cbf65200fe750ac927067da94f7bfdd",
+          "warmup-000": "11bdffb2b0cbe677e2f3fa87e0752e468cbf65200fe750ac927067da94f7bfdd"
+        }
+      },
+      {
+        "variant": "snapshot-offload",
+        "formal_seconds": [
+          26.477159809088334,
+          24.05595041892957,
+          24.154683717060834
+        ],
+        "mean_seconds": 24.895931315026246,
+        "sample_stdev_seconds": 1.3702735963541604,
+        "common_png_sha256": {
+          "formal-000": "11bdffb2b0cbe677e2f3fa87e0752e468cbf65200fe750ac927067da94f7bfdd",
+          "formal-001": "11bdffb2b0cbe677e2f3fa87e0752e468cbf65200fe750ac927067da94f7bfdd",
+          "formal-002": "11bdffb2b0cbe677e2f3fa87e0752e468cbf65200fe750ac927067da94f7bfdd",
+          "warmup-000": "11bdffb2b0cbe677e2f3fa87e0752e468cbf65200fe750ac927067da94f7bfdd"
+        }
+      }
+    ],
+    "mean_reduction_seconds": 0.49970920166621724,
+    "output_equivalence": {
+      "formal-000": {
+        "bytes_equal": true,
+        "pixels_equal": true,
+        "max_difference": 0,
+        "MAE": 0.0,
+        "shape": [
+          1024,
+          1024,
+          4
+        ]
+      },
+      "formal-001": {
+        "bytes_equal": true,
+        "pixels_equal": true,
+        "max_difference": 0,
+        "MAE": 0.0,
+        "shape": [
+          1024,
+          1024,
+          4
+        ]
+      },
+      "formal-002": {
+        "bytes_equal": true,
+        "pixels_equal": true,
+        "max_difference": 0,
+        "MAE": 0.0,
+        "shape": [
+          1024,
+          1024,
+          4
+        ]
+      },
+      "warmup-000": {
+        "bytes_equal": true,
+        "pixels_equal": true,
+        "max_difference": 0,
+        "MAE": 0.0,
+        "shape": [
+          1024,
+          1024,
+          4
+        ]
+      }
+    },
+    "remaining_tail_delay_seconds": 2.52482106606476
+  },
+  "configuration_validation": {
+    "source_commit": "49933325cca5cfa32e03e06843774fa70fec64b5",
+    "checked": [
+      {
+        "profile": "moss-sft-snapshot",
+        "baseline": true,
+        "sampling_type": "MOSSImageSamplingParams",
+        "native_schema_accepted": true,
+        "policy": null
+      },
+      {
+        "profile": "moss-sft-snapshot",
+        "baseline": false,
+        "sampling_type": "MOSSImageSamplingParams",
+        "native_schema_accepted": true,
+        "policy": {
+          "dit": "snapshot-offload",
+          "text_encoder": "snapshot-offload"
+        }
+      }
+    ],
+    "gpu_generations": 0,
+    "scope": "Recorded native schema validation of the equivalent original combined profile; the split CLI has CPU checks only, with no new GPU generations."
+  }
+}
