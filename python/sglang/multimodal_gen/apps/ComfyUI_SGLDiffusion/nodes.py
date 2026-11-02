@@ -16,6 +16,7 @@ import folder_paths
 import torch
 
 from .core import SGLDiffusionGenerator, SGLDiffusionServerAPI
+from .core.graph_rewrite import install as install_graph_rewrite
 from .options import SGLDOptions
 
 
@@ -87,6 +88,9 @@ def _comfy_job_hooks() -> dict:
         "progress_callback": pbar.update_absolute,
         "check_interrupt": comfy.model_management.throw_exception_if_processing_interrupted,
     }
+
+
+install_graph_rewrite()
 
 
 class SGLDLoraLoader:
