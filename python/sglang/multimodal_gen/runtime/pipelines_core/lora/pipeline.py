@@ -1205,12 +1205,6 @@ class LoRAPipeline(ComposedPipelineBase):
             first_effective_merge_weights = self._should_merge_lora_for_layers(
                 first_module_name, first_lora_layers_dict, merge_mode
             )
-            if not first_effective_merge_weights and len(tgt_nicknames) > 1:
-                raise ValueError(
-                    "Dynamic LoRA currently supports only one adapter per target. "
-                    "Use merge_mode='merge' for multiple adapters."
-                )
-
             merge_weights_by_module = {}
             for module_name, lora_layers_dict in target_modules:
                 merge_weights_by_module[module_name] = (

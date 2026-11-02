@@ -465,8 +465,44 @@ class BaseLayerWithLoRA(nn.Module):
         self.disable_lora = False
         if merge_weights:
             self.merge_lora_weights()
-        elif self.merged:
-            self.unmerge_lora_weights()
+        else:
+            if self.merged:
+                self.unmerge_lora_weights()
+            if len(self.lora_weights_list) > 1:
+                self._stack_dynamic_adapters()
+
+    def _stack_dynamic_adapters(self) -> None:
+        """Serve every listed adapter from one unmerged factor pair.
+
+        sum_i s_i * (a_i / r_i) * B_i A_i equals B A for A = [A_1; A_2; ...] and
+        B = [c_1 B_1 | c_2 B_2 | ...] with c_i = s_i * a_i / r_i, so the dynamic
+        forward paths, which read a single lora_A / lora_B, apply all of them.
+        """
+        As, Bs, offsets = [], [], []
+        for A, B, _, strength, rank, alpha, offset in self.lora_weights_list:
+            scale = strength
+            if rank is not None and alpha is not None and rank != alpha:
+                scale *= alpha / rank
+            As.append(A.data)
+            Bs.append(B.data * scale if scale != 1.0 else B.data)
+            if offset is not None:
+                offsets.append(offset.data * scale if scale != 1.0 else offset.data)
+        if len({A.dim() for A in As}) != 1:
+            raise ValueError("cannot stack plain and grouped LoRA adapters on one layer")
+        device = As[0].device
+        A = torch.cat([a.to(device) for a in As], dim=-2)
+        B = torch.cat([b.to(device=device, dtype=Bs[0].dtype) for b in Bs], dim=-1)
+        self.lora_A = torch.nn.Parameter(A, requires_grad=False)
+        self.lora_B = torch.nn.Parameter(B, requires_grad=False)
+        self.lora_output_offset = (
+            torch.nn.Parameter(sum(o.to(device) for o in offsets), requires_grad=False)
+            if offsets
+            else None
+        )
+        # Scales are folded into B and the offset above.
+        self.strength = 1.0
+        self.lora_rank = self.lora_alpha = A.shape[-2]
+        self.lora_path = ",".join(str(p) for _, _, p, *_ in self.lora_weights_list)
 
     def clear_lora_weights(self) -> None:
         self.lora_weights_list.clear()

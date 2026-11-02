@@ -186,16 +186,22 @@ def _flux_step(ex, **kwargs):
     [
         {"patches_replace": {"dit": {("double_block", 3): object()}}},
         {"patches": {"attn1_patch": [object()]}},
-        {"optimized_attention_override": object()},
     ],
 )
 def test_comfy_model_patches_are_rejected_not_dropped(options) -> None:
-    """ComfyUI model patches (H3 Fun ControlNet block replace, attention backend
-    override) never reach the worker; ignoring them gave bit-identical output."""
+    """Patches that change what the DiT computes (H3 Fun ControlNet block replace)
+    never reach the worker; ignoring them gave bit-identical output."""
     ex = _RecordingExecutor(FluxAdapter())
     with pytest.raises(ValueError, match="cannot apply ComfyUI model patches"):
         _flux_step(ex, transformer_options=options)
     _flux_step(ex, transformer_options={"patches": {}, "patches_replace": {"dit": {}}})
+    assert len(ex.sent) == 1
+
+
+def test_attention_override_is_ignored() -> None:
+    """An attention backend override only picks a kernel; the worker picks its own."""
+    ex = _RecordingExecutor(FluxAdapter())
+    _flux_step(ex, transformer_options={"optimized_attention_override": object()})
     assert len(ex.sent) == 1
 
 

@@ -16,6 +16,8 @@ import folder_paths
 import torch
 
 from .core import SGLDiffusionGenerator, SGLDiffusionServerAPI
+from .core.graph_rewrite import install as install_graph_rewrite
+from .core.lora_bridge import add_sgld_lora, install as install_lora_bridge
 from .options import SGLDOptions
 
 
@@ -89,6 +91,10 @@ def _comfy_job_hooks() -> dict:
     }
 
 
+install_lora_bridge()
+install_graph_rewrite()
+
+
 class SGLDLoraLoader:
     @classmethod
     def INPUT_TYPES(cls):
@@ -119,35 +125,7 @@ class SGLDLoraLoader:
         """Load LoRA adapter using SGLang Diffusion API."""
         lora_path = folder_paths.get_full_path("loras", lora_name)
         assert model is not None
-        bi = model.clone()
-        nickname = nickname if nickname != "" else str("lora" + str(uuid.uuid4()))
-        # set lora in the model
-        bi.patches[nickname] = (lora_path, strength_model, target)
-
-        # prepare input for the SGLang Diffusion API
-        lora_input = {
-            "lora_nickname": [],
-            "lora_path": [],
-            "strength": [],
-            "target": [],
-        }
-        for nickname, lora_info in bi.patches.items():
-            lora_input["lora_nickname"].append(nickname)
-            lora_input["lora_path"].append(lora_info[0])
-            lora_input["strength"].append(lora_info[1])
-            lora_input["target"].append(lora_info[2])
-
-        targets = set(lora_input["target"])
-        if "all" in targets and len(targets) > 1:
-            # set_lora groups adapters per target string; "all" overlapping a
-            # named target makes the worker keep only one group on that module.
-            raise ValueError(
-                "Chained SGLDLoraLoader nodes mix target 'all' with "
-                f"{sorted(targets - {'all'})}; use the same target on every node"
-            )
-        # The shared worker is bound to the selected MODEL at sampling time.
-        bi.model_options["sgld_lora_input"] = lora_input
-        return (bi,)
+        return (add_sgld_lora(model, lora_path, strength_model, nickname, target),)
 
 
 class SGLDUNETLoader:
