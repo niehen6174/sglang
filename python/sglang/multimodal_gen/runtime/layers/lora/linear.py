@@ -488,7 +488,12 @@ class BaseLayerWithLoRA(nn.Module):
             if offset is not None:
                 offsets.append(offset.data * scale if scale != 1.0 else offset.data)
         if len({A.dim() for A in As}) != 1:
-            raise ValueError("cannot stack plain and grouped LoRA adapters on one layer")
+            # Mixed with plain adapters: a grouped [g, r, in] / [g, out, r] pair is
+            # the plain [g*r, in] / block-diagonal [g*out, g*r] pair.
+            for i, (A, B) in enumerate(zip(As, Bs)):
+                if A.dim() == 3:
+                    As[i] = A.reshape(-1, A.shape[-1])
+                    Bs[i] = torch.block_diag(*B.unbind(0))
         device = As[0].device
         A = torch.cat([a.to(device) for a in As], dim=-2)
         B = torch.cat([b.to(device=device, dtype=Bs[0].dtype) for b in Bs], dim=-1)
