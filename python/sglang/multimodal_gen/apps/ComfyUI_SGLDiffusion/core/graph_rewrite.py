@@ -12,7 +12,9 @@ are left in place, so they still fail loudly at sampling time.
 """
 
 import functools
+import json
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +62,11 @@ SPEED_ONLY_PATCHES = {
     "ApplyFBCacheOnModel": _CACHE,
 }
 # SGLDOptions values that mean "not chosen"; anything else the user set wins.
-_UNSET = {"attention_backend": "auto", "cache_mode": "off"}
+_UNSET = {
+    "attention_backend": "auto",
+    "attention_backend_config": "",
+    "cache_mode": "off",
+}
 
 
 # MODEL-only LoRA nodes that patch DiT internals themselves (so they bypass
@@ -191,11 +197,46 @@ def _carry_over(prompt: dict, loader_id: str, settings: dict) -> list[str]:
         options = prompt[options_id] = {"class_type": "SGLDOptions", "inputs": {}}
         loader["inputs"]["sgld_options"] = [options_id, 0]
     applied = []
+    config = settings.pop("attention_backend_config", None)
     for key, value in settings.items():
         if options["inputs"].get(key, _UNSET[key]) == _UNSET[key]:
             options["inputs"][key] = value
             applied.append(f"{key}={value}")
+    # Sol's parameters apply only when Sol is the backend that ends up selected.
+    inputs = options["inputs"]
+    if (
+        config
+        and inputs.get("attention_backend") == _SOL[1]
+        and inputs.get("attention_backend_config", "") == ""
+    ):
+        inputs["attention_backend_config"] = config
+        applied.append(f"attention_backend_config={config}")
     return applied
+
+
+def _sol_config(node: dict) -> str:
+    """The community Sol node's sparsity as SGLD sol_attn config.
+
+    Those nodes run every step sparse with their own tau; SGLD's defaults keep
+    the first 10 steps and layers 0-1 dense, which leaves a turbo (8-12 step)
+    sampler almost dense.
+    """
+    inputs = node.get("inputs", {})
+    config = {"dense_steps": 0, "dense_layers": ""}
+    tau = inputs.get("tau", inputs.get("tau_start"))
+    if isinstance(tau, (int, float)):
+        config["tau"] = float(tau)
+    if isinstance(inputs.get("thresh_type"), str):
+        config["thresh_type"] = inputs["thresh_type"]
+    dense = inputs.get("dense_blocks")
+    # SGLD takes non-negative indices and ranges only ("0-3,47").
+    if (
+        isinstance(dense, str)
+        and re.fullmatch(r"[\d,\s-]*", dense)
+        and not re.search(r"(^|,)\s*-", dense)
+    ):
+        config["dense_layers"] = dense
+    return json.dumps(config, sort_keys=True)
 
 
 def drop_speed_patches(prompt: dict) -> list[str]:
@@ -240,7 +281,10 @@ def drop_speed_patches(prompt: dict) -> list[str]:
         setting = _sgld_setting(node)
         if setting:
             # The first speed-up per kind wins, as on ComfyUI's patch chain.
-            carry.setdefault(loader_id, {}).setdefault(*setting)
+            settings = carry.setdefault(loader_id, {})
+            if setting == _SOL and "attention_backend" not in settings:
+                settings["attention_backend_config"] = _sol_config(node)
+            settings.setdefault(*setting)
     for loader_id, settings in carry.items():
         applied = _carry_over(prompt, loader_id, settings)
         if applied:

@@ -2,6 +2,7 @@
 """Community-workflow compatibility: speed-only patch nodes, custom LoRA loaders,
 third-party LoRA stacks and several dynamic LoRA adapters on one layer."""
 
+import json
 import sys
 import types
 from unittest import mock
@@ -105,7 +106,29 @@ def test_speed_ups_carry_over_unless_the_user_chose_a_value(
     prompt["2"] = {"class_type": "SolAttnMiniMax", "inputs": {"model": ["1", 0]}}
     drop_speed_patches(prompt)
     # The first attention patch on the chain wins, as in ComfyUI.
-    assert prompt["1.sgld_options"]["inputs"] == {"attention_backend": "sol_attention"}
+    assert prompt["1.sgld_options"]["inputs"]["attention_backend"] == "sol_attention"
+
+    # Sol keeps the node's sparsity: every step sparse at its tau, not SGLD's
+    # 10 dense warm-up steps.
+    prompt = _graph("SGLDUNETLoader")
+    prompt["2"] = {
+        "class_type": "MiniMaxH3MemoryEfficientSolAttentionPatch",
+        "inputs": {
+            "model": ["1", 0],
+            "tau": 1.3,
+            "thresh_type": "diag",
+            "dense_blocks": "",
+        },
+    }
+    drop_speed_patches(prompt)
+    assert json.loads(
+        prompt["1.sgld_options"]["inputs"]["attention_backend_config"]
+    ) == {
+        "dense_layers": "",
+        "dense_steps": 0,
+        "tau": 1.3,
+        "thresh_type": "diag",
+    }
 
     prompt = _graph("SGLDUNETLoader")
     prompt["1"]["inputs"]["sgld_options"] = ["9", 0]
