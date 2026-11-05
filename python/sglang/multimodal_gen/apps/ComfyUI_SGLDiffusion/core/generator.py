@@ -83,8 +83,9 @@ def _default_fasth3_attention(path: str, sgld_options: dict) -> None:
     """A FastH3 single file runs the VSA-H3 attention it was distilled with.
 
     FastH3 8-Step V2 trains at 0.8 sparsity, as the native loader defaults.
-    ComfyUI's BlockSparseAttention / attention-backend nodes are dropped for
-    SGLD models, so this replaces them. An explicit attention_backend wins.
+    The workflow converter bypasses ComfyUI's BlockSparseAttention / attention-
+    backend nodes on SGLD models, so this replaces them. An explicit
+    attention_backend wins.
     """
     from sglang.multimodal_gen.runtime.loader.comfyui_checkpoints.minimax_h3 import (
         has_vsa_gate,

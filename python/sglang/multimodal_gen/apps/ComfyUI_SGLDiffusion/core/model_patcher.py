@@ -29,6 +29,18 @@ class SGLDModelPatcher(ModelPatcher):
             "lumina2": 8 * 1024 * 1024 * 1024,
         }
 
+    def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
+        # The worker owns the DiT weights: a ComfyUI weight patch (a LoRA node
+        # that is not an SGLD one) would be silently lost.
+        if patches:
+            from .sgld_lora import CONVERT_HINT
+
+            raise ValueError(
+                "A ComfyUI LoRA / weight-patch node is applied to an SGLD model; use "
+                f"SGLDLoraLoader / SGLDLoraLoaderWithCLIP, or {CONVERT_HINT}"
+            )
+        return []
+
     def clone(self):
         """Clone the model patcher."""
         n = SGLDModelPatcher(

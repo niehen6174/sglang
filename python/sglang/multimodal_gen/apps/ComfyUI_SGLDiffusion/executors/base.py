@@ -3,7 +3,6 @@ Base executor class for SGLang Diffusion ComfyUI integration.
 """
 
 import hashlib
-import logging
 import uuid
 
 import torch
@@ -126,23 +125,17 @@ def _reject_model_patches(transformer_options) -> None:
         for name, items in (opts.get("patches") or {}).items()
         if items
     ]
-    if opts.get("optimized_attention_override") is not None and not _warned_attention:
-        # An attention-kernel choice only changes speed; the worker picks its own.
-        _warned_attention.append(True)
-        logging.getLogger(__name__).warning(
-            "SGLD: ignoring the ComfyUI attention override on this model; set "
-            "attention_backend in SGLDOptions instead"
-        )
+    if opts.get("optimized_attention_override") is not None:
+        found.append("optimized_attention_override")
     if found:
+        from ..core.sgld_lora import CONVERT_HINT
+
         raise ValueError(
             "SGLD integrated mode runs the diffusion model in its worker and cannot "
-            f"apply ComfyUI model patches ({', '.join(sorted(found))}); these change "
-            "what the model computes (ControlNet, block patches), so remove them or "
-            "use the native ComfyUI loader"
+            f"apply ComfyUI model patches ({', '.join(sorted(found))}). Speed patches "
+            "(attention backends, caches) map to SGLDOptions; ControlNet / block "
+            f"patches are not supported. To {CONVERT_HINT}"
         )
-
-
-_warned_attention: list = []
 
 
 # apply_model kwargs that carry image content (ControlNet residuals, reference latents).
