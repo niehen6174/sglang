@@ -30,6 +30,27 @@ OPTIONS_WIDGETS = [
     "regional_compile", "memory_mode", "resident_layers", "prefetch_layers",
     "alignment_mode",
 ]  # fmt: skip
+# What the frontend saves in widgets_values: options.js inserts a group header
+# button (saved as null) before each group's first field.
+OPTIONS_HEADERS_BEFORE = ("parallel_mode", "attention_backend", "quantization",
+                          "cache_mode", "execution_mode", "memory_mode")  # fmt: skip
+OPTIONS_LAYOUT = [
+    slot
+    for name in OPTIONS_WIDGETS
+    for slot in ((None, name) if name in OPTIONS_HEADERS_BEFORE else (name,))
+]
+
+
+def options_index(name, values) -> int:
+    """Position of an SGLDOptions field in saved widgets_values (with or without headers)."""
+    layout = OPTIONS_LAYOUT if len(values) == len(OPTIONS_LAYOUT) else OPTIONS_WIDGETS
+    return layout.index(name)
+
+
+def options_values() -> list:
+    return [None if slot is None else OPTIONS_DEFAULTS[slot] for slot in OPTIONS_LAYOUT]
+
+
 OPTIONS_DEFAULTS = {
     "model_type": "auto-detect", "num_gpus": 1, "parallel_mode": "auto", "tp_size": 1,
     "ulysses_degree": 1, "ring_degree": 1, "attention_backend": "auto",

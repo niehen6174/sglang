@@ -236,7 +236,7 @@ def _options_node(graph, loader, report):
     node = graph.add_node(
         "SGLDOptions", (x, y - 330), [],
         [{"name": "sgld_options", "type": "SGLD_OPTIONS", "links": []}],
-        [rules.OPTIONS_DEFAULTS[k] for k in rules.OPTIONS_WIDGETS], size=(420, 300),
+        rules.options_values(), size=(420, 300),
     )  # fmt: skip
     graph.add_link(node, 0, loader, slot, "SGLD_OPTIONS")
     report.change(
@@ -256,12 +256,10 @@ def _apply_options(graph, loader, settings, report):
             f"Loader {loader['id']} takes options from a non-SGLDOptions node; speed settings not applied."
         )
         return
-    values = node.setdefault(
-        "widgets_values", [rules.OPTIONS_DEFAULTS[k] for k in rules.OPTIONS_WIDGETS]
-    )
+    values = node.setdefault("widgets_values", rules.options_values())
     applied = []
     for key, value in settings.items():
-        i = rules.OPTIONS_WIDGETS.index(key)
+        i = rules.options_index(key, values)
         if (
             isinstance(values, list)
             and i < len(values)

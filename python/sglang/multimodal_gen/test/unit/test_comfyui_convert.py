@@ -51,7 +51,11 @@ def _by_type(wf, kind):
 
 def _options(wf):
     (opts,) = _by_type(wf, "SGLDOptions")
-    return dict(zip(rules.OPTIONS_WIDGETS, opts["widgets_values"]))
+    values = opts["widgets_values"]
+    return {
+        name: values[rules.options_index(name, values)]
+        for name in rules.OPTIONS_WIDGETS
+    }
 
 
 def test_loader_swap_and_speed_nodes_become_visible_options() -> None:
@@ -72,6 +76,12 @@ def test_loader_swap_and_speed_nodes_become_visible_options() -> None:
         opts["attention_backend"] == "sage_attention2"
         and opts["cache_mode"] == "cache_dit"
     )
+    # Saved as the frontend saves it: a null for each group header button.
+    (node,) = _by_type(out, "SGLDOptions")
+    assert len(node["widgets_values"]) == len(rules.OPTIONS_LAYOUT) == 28
+    assert [i for i, v in enumerate(node["widgets_values"]) if v is None] == [
+        i for i, slot in enumerate(rules.OPTIONS_LAYOUT) if slot is None
+    ]
     # The options node is wired into the loader's new sgld_options input.
     slot = next(i for i in nodes[1]["inputs"] if i["name"] == "sgld_options")
     link = next(l for l in out["links"] if l[0] == slot["link"])
