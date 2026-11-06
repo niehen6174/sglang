@@ -193,7 +193,7 @@ def test_comfy_model_patches_are_rejected_not_dropped(options) -> None:
     """ComfyUI model patches (H3 Fun ControlNet block replace, attention backend
     override) never reach the worker; ignoring them gave bit-identical output."""
     ex = _RecordingExecutor(FluxAdapter())
-    with pytest.raises(ValueError, match="cannot apply ComfyUI model patches"):
+    with pytest.raises(ValueError, match="cannot apply ComfyUI model patches.*convert"):
         _flux_step(ex, transformer_options=options)
     _flux_step(ex, transformer_options={"patches": {}, "patches_replace": {"dit": {}}})
     assert len(ex.sent) == 1

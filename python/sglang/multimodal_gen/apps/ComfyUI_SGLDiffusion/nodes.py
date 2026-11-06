@@ -16,6 +16,7 @@ import folder_paths
 import torch
 
 from .core import SGLDiffusionGenerator, SGLDiffusionServerAPI
+from .core.sgld_lora import add_sgld_lora, apply_clip_lora
 from .options import SGLDOptions
 
 
@@ -119,35 +120,42 @@ class SGLDLoraLoader:
         """Load LoRA adapter using SGLang Diffusion API."""
         lora_path = folder_paths.get_full_path("loras", lora_name)
         assert model is not None
-        bi = model.clone()
-        nickname = nickname if nickname != "" else str("lora" + str(uuid.uuid4()))
-        # set lora in the model
-        bi.patches[nickname] = (lora_path, strength_model, target)
+        return (add_sgld_lora(model, lora_path, strength_model, nickname, target),)
 
-        # prepare input for the SGLang Diffusion API
-        lora_input = {
-            "lora_nickname": [],
-            "lora_path": [],
-            "strength": [],
-            "target": [],
+
+class SGLDLoraLoaderWithCLIP:
+    """LoraLoader for an SGLD model: the DiT half goes to the SGLD worker, the
+    text-encoder half is applied by ComfyUI. Same inputs and outputs as LoraLoader."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
+                "lora_name": (folder_paths.get_filename_list("loras"),),
+                "strength_model": (
+                    "FLOAT",
+                    {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01},
+                ),
+                "strength_clip": (
+                    "FLOAT",
+                    {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01},
+                ),
+            },
         }
-        for nickname, lora_info in bi.patches.items():
-            lora_input["lora_nickname"].append(nickname)
-            lora_input["lora_path"].append(lora_info[0])
-            lora_input["strength"].append(lora_info[1])
-            lora_input["target"].append(lora_info[2])
 
-        targets = set(lora_input["target"])
-        if "all" in targets and len(targets) > 1:
-            # set_lora groups adapters per target string; "all" overlapping a
-            # named target makes the worker keep only one group on that module.
-            raise ValueError(
-                "Chained SGLDLoraLoader nodes mix target 'all' with "
-                f"{sorted(targets - {'all'})}; use the same target on every node"
-            )
-        # The shared worker is bound to the selected MODEL at sampling time.
-        bi.model_options["sgld_lora_input"] = lora_input
-        return (bi,)
+    RETURN_TYPES = ("MODEL", "CLIP")
+    FUNCTION = "load_lora"
+    CATEGORY = "SGLDiffusion"
+
+    def load_lora(self, model, clip, lora_name, strength_model, strength_clip):
+        lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
+        if strength_model != 0:
+            model = add_sgld_lora(model, lora_path, strength_model)
+        if strength_clip != 0 and clip is not None:
+            clip = apply_clip_lora(clip, lora_path, strength_clip)
+        return (model, clip)
 
 
 class SGLDUNETLoader:
@@ -1114,6 +1122,7 @@ NODE_CLASS_MAPPINGS = {
     "SGLDNativeModelLoader": SGLDNativeModelLoader,
     "SGLDOptions": SGLDOptions,
     "SGLDLoraLoader": SGLDLoraLoader,
+    "SGLDLoraLoaderWithCLIP": SGLDLoraLoaderWithCLIP,
     "SGLDWorkerStatus": SGLDWorkerStatus,
 }
 
@@ -1128,5 +1137,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SGLDNativeModelLoader": "SGLDiffusion Native Model Loader",
     "SGLDOptions": "SGLDiffusion Options",
     "SGLDLoraLoader": "SGLDiffusion LoRA Loader",
+    "SGLDLoraLoaderWithCLIP": "SGLDiffusion LoRA Loader (with CLIP)",
     "SGLDWorkerStatus": "SGLDiffusion Worker Status",
 }

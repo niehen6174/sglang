@@ -129,6 +129,35 @@ Reference workflow files are provided in the `workflows/` directory:
 
 For other workflows supporting the models, you can easily use SGLang by replacing the official `UNET Loader` node with the `SGLDUNETLoader` node. Similarly, for LoRA support, replace the official LoRA loader with the `SGLDiffusion LoRA Loader`.
 
+### Converting community workflows
+
+Community workflows often add speed-only patch nodes (SageAttention, Sol / SLA
+sparse attention, EasyCache and other step caches, torch.compile) and third-party
+LoRA loaders. On an SGLD model those cannot run in ComfyUI: the worker owns the
+DiT. The converter rewrites a workflow so every change stays visible in the graph:
+
+```bash
+python -m sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.convert my_workflow.json \
+    --report my_workflow_sgld.md          # writes my_workflow_sgld.json
+```
+
+- `UNETLoader` with an H3 / Qwen / Z-Image / FLUX.1 file becomes `SGLDUNETLoader`
+  (other models, e.g. an LTX refine stage, stay on ComfyUI).
+- Speed nodes on that model are bypassed, and the speed-up they asked for is set
+  on an `SGLDiffusion Options` node when the model supports it: Sage / sparse
+  attention -> `sage_attention2`, Sol -> `sol_attention` with the node's tau,
+  step caches -> `cache_dit` (H3). A value already set on the options node wins.
+- `LoraLoaderModelOnly`, `MiniMaxH3TurboLoRA` -> `SGLDiffusion LoRA Loader`;
+  `LoraLoader` -> `SGLDiffusion LoRA Loader (with CLIP)`; LoRA stacks (rgthree
+  Power Lora, AusBoss, LoraManager) keep their CLIP / trigger outputs and hand
+  their model LoRAs to chained SGLD LoRA loaders.
+- Works on UI and API JSON, including loaders inside subgraphs. The report lists
+  every change and what was not converted. Supported nodes are a table in
+  `convert/rules.py`.
+
+Without conversion, a stock LoRA or patch node on an SGLD model fails with an
+error that points here, instead of being silently ignored.
+
 To use these workflows:
 1. Open ComfyUI.
 2. Load the workflow JSON file from the `workflows/` directory.

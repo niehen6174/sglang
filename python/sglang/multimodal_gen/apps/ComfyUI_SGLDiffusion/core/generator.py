@@ -77,15 +77,29 @@ def _check_h3_single_file(path: str, sgld_options: dict) -> None:
             "file (e.g. *_int8_convrot), whose per-layer metadata selects the "
             "format, and leave quantization empty"
         )
-    from safetensors import safe_open
 
-    with safe_open(path, framework="pt") as f:
-        if any(".to_gate_compress." in key for key in f.keys()):
-            raise ValueError(
-                "This is a FastH3 checkpoint (VSA gate weights), which the base "
-                "MiniMax H3 model cannot load; load the native FastH3 directory "
-                "with SGLDNativeModelLoader"
-            )
+
+def _default_fasth3_attention(path: str, sgld_options: dict) -> None:
+    """A FastH3 single file runs the VSA-H3 attention it was distilled with.
+
+    FastH3 8-Step V2 trains at 0.8 sparsity, as the native loader defaults.
+    The workflow converter bypasses ComfyUI's BlockSparseAttention / attention-
+    backend nodes on SGLD models, so this replaces them. An explicit
+    attention_backend wins.
+    """
+    from sglang.multimodal_gen.runtime.loader.comfyui_checkpoints.minimax_h3 import (
+        has_vsa_gate,
+    )
+
+    if "attention_backend" in sgld_options or not has_vsa_gate(path):
+        return
+    name = os.path.basename(path).lower()
+    if "ref2va" in name or "omniref" in name:
+        # VSA-H3 tiles references only on the native packed layout, not the
+        # ComfyUI Ref2VA layout; keep the default dense attention.
+        return
+    sgld_options["attention_backend"] = "video_sparse_attn_h3"
+    sgld_options.setdefault("attention_backend_config", '{"VSA_sparsity": 0.8}')
 
 
 # Renamed local files and directories miss the registry's path detectors and
@@ -103,6 +117,9 @@ def _looks_like_gguf(path: str) -> bool:
         ":" in path and path.count("/") == 1 and not os.path.isabs(path)
     )
 
+
+# ensure_executor default: resend the adapters the executor last set.
+_LAST_LORA = object()
 
 _NATIVE_MODEL_TYPES = {"FastH3Pipeline": "fast_h3", "VDNH3Pipeline": "vdn_h3"}
 NATIVE_MODEL_TYPES = tuple(_NATIVE_MODEL_TYPES.values())
@@ -501,8 +518,12 @@ class SGLDiffusionGenerator:
             and self._is_live()
         )
 
-    def ensure_executor(self, executor) -> None:
-        """Rebuild the worker if this cached executor no longer owns it."""
+    def ensure_executor(self, executor, lora_input=_LAST_LORA) -> None:
+        """Rebuild the worker if this cached executor no longer owns it.
+
+        The new worker gets ``lora_input``; by default (mid-run) the adapters
+        the executor last set.
+        """
         self._active_executor = executor
         if self._owns_live(executor):
             return
@@ -517,7 +538,9 @@ class SGLDiffusionGenerator:
         )
         self.load_model(**reload)
         executor.generator = self.generator
-        lora = executor._lora_input
+        lora = executor._lora_input if lora_input is _LAST_LORA else lora_input
+        # The new worker has no adapters loaded.
+        executor._lora_input = None
         if lora and lora.get("lora_nickname"):
             executor.set_lora(**lora)
         # The new worker's session cache starts empty, so conditioning the
@@ -681,6 +704,8 @@ class SGLDiffusionGenerator:
         else:
             sgld_options.pop("transformer_weights_path", None)
         detect_path = model_path
+        if not native_dir:
+            _default_fasth3_attention(detect_path, sgld_options)
         gather_options = {
             "model_path": detect_path,
             "model_options": model_options,
