@@ -217,6 +217,32 @@ class _Ids:
         return node_id
 
 
+def _free_spot(graph, anchor, size):
+    """A position next to ``anchor`` that covers as little of the existing graph as possible."""
+    w, h = size
+    (x, y), (aw, ah) = (
+        anchor.get("pos", [0, 0])[:2],
+        (anchor.get("size") or [320, 100])[:2],
+    )
+    gap, title = 60, 40  # node titles sit above pos
+    spots = [(x, y - h - gap - title), (x - w - gap, y), (x + aw + gap, y), (x, y + ah + gap + title),
+             (x - w - gap, y - h - gap - title), (x + aw + gap, y - h - gap - title)]  # fmt: skip
+
+    def covered(px, py):
+        total = 0
+        for n in graph.nodes.values():
+            if n is anchor or "pos" not in n:
+                continue
+            nx, ny = n["pos"][:2]
+            nw, nh = (n.get("size") or [200, 100])[:2]
+            ox = min(px + w, nx + nw) - max(px, nx)
+            oy = min(py + h, ny + nh) - max(py - title, ny - title)
+            total += max(0, ox) * max(0, oy)
+        return total
+
+    return list(min(spots, key=lambda p: covered(*p)))
+
+
 def _options_node(graph, loader, report):
     """The SGLDOptions node wired into ``loader``; created if there is none."""
     slot = next(
@@ -232,9 +258,8 @@ def _options_node(graph, loader, report):
             {"name": "sgld_options", "type": "SGLD_OPTIONS", "link": None}
         )
         slot = len(loader["inputs"]) - 1
-    x, y = loader.get("pos", [0, 0])[:2]
     node = graph.add_node(
-        "SGLDOptions", (x, y - 330), [],
+        "SGLDOptions", _free_spot(graph, loader, (420, 300)), [],
         [{"name": "sgld_options", "type": "SGLD_OPTIONS", "links": []}],
         rules.options_values(), size=(420, 300),
     )  # fmt: skip

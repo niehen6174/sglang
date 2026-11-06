@@ -268,3 +268,23 @@ def test_workflows_without_an_sgld_model_are_left_alone() -> None:
 )  # fmt: skip
 def test_model_type_from_file_name(name, kind) -> None:
     assert rules.model_type(name) == kind
+
+
+def test_added_options_node_avoids_existing_nodes() -> None:
+    """The new SGLDOptions node goes where it covers nothing (it used to land on
+    whatever sat right above the loader, e.g. an image loader with its preview)."""
+    wf = _chain(H3, ("PathchSageAttentionKJ", []))
+    loader = wf["nodes"][0]
+    loader["pos"], loader["size"] = [1000, 1000], [400, 120]
+    above = _node(50, "LoadImage", ["x.png"], outputs=[("IMAGE", "IMAGE")])
+    above["pos"], above["size"] = [900, 500], [600, 450]
+    wf["nodes"].append(above)
+    out, _ = convert_workflow(wf)
+    (opts,) = _by_type(out, "SGLDOptions")
+    (x, y), (w, h) = opts["pos"], opts["size"]
+    for n in out["nodes"]:
+        if n is opts or "pos" not in n:
+            continue
+        nx, ny = n["pos"]
+        nw, nh = n["size"]
+        assert x + w <= nx or nx + nw <= x or y + h <= ny or ny + nh <= y, n["type"]
