@@ -315,6 +315,38 @@ def test_reply_send_holds_the_socket_lock():
     assert not scheduler._socket_lock.locked()
 
 
+@pytest.mark.parametrize(
+    "endpoint,spills",
+    [("ipc:///tmp/sgl-scheduler", True), ("tcp://10.0.0.1:5555", False)],
+)
+def test_reply_shares_cuda_tensors_only_with_local_clients(
+    monkeypatch, endpoint, spills
+):
+    # The client rebuilds CUDA IPC handles only for local endpoints, so a remote
+    # client must receive the tensors themselves, never unresolved handles.
+    import sglang.multimodal_gen.runtime.managers.scheduler as scheduler_module
+
+    spilled = []
+    monkeypatch.setattr(
+        scheduler_module,
+        "spill_cuda_tensors",
+        lambda batch, in_place=False: spilled.append(batch),
+    )
+    monkeypatch.setattr(
+        scheduler_module, "spill_large_arrays_to_file_refs", lambda output, _: output
+    )
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler._socket_lock = threading.Lock()
+    scheduler.server_args = SimpleNamespace(scheduler_endpoint=endpoint)
+    sent = []
+    scheduler.receiver = SimpleNamespace(send_multipart=sent.append)
+
+    scheduler.return_result(OutputBatch(), identity=b"client")
+
+    assert bool(spilled) is spills
+    assert len(sent) == 1
+
+
 def test_idle_wait_leaves_the_socket_lock_to_a_pending_reply():
     # The finalize thread replies under _socket_lock; a loop that waited holding
     # it and re-took it right after starved that reply for up to a second.

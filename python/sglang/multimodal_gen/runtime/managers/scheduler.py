@@ -921,13 +921,15 @@ class Scheduler(
                             output_batch.output, identity
                         )
 
-                with self._record_return_stage(
-                    output_batch, "Scheduler.return_result.spill_cuda"
-                ):
-                    # The previous reply has already been mapped: the client
-                    # only sends the next hop after materializing the last one.
-                    release_retained_producer_tensors()
-                    spill_cuda_tensors(output_batch, in_place=True)
+                    # The client rebuilds CUDA IPC handles only on local
+                    # endpoints; a remote one must receive pickled tensors.
+                    with self._record_return_stage(
+                        output_batch, "Scheduler.return_result.spill_cuda"
+                    ):
+                        # The previous reply has already been mapped: the client
+                        # only sends the next hop after materializing the last one.
+                        release_retained_producer_tensors()
+                        spill_cuda_tensors(output_batch, in_place=True)
                 with self._record_return_stage(
                     output_batch, "Scheduler.return_result.pickle"
                 ):
