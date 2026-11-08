@@ -225,7 +225,7 @@ class SGLDUNETLoader:
 
 
 class SGLDNativeModelLoader:
-    """Native SGLang model directories (FastH3, VDN-H3) that have no ComfyUI single file."""
+    """Native SGLang model directories (Z-Image, FastH3, VDN-H3)."""
 
     def __init__(self):
         self.generator = SGLDiffusionGenerator.shared()
