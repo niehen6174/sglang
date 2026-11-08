@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ViT runtime helpers for the MiniMax H3 visual VAE.
+import importlib.util
+import sys
 from collections.abc import Sequence
 from typing import Tuple
 
@@ -165,7 +167,12 @@ def apply_rotary_pos_emb_qk(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply the exact native NeoX rotary kernel to Q/K together when possible."""
     native = native_rope_cache(query, key, rotary_pos_emb)
-    if native is not None:
+    # sgl_kernel publishes no Windows build; fall through to the eager rotation.
+    if (
+        native is not None
+        and sys.platform != "win32"
+        and importlib.util.find_spec("sgl_kernel") is not None
+    ):
         from sgl_kernel import rotary_embedding
 
         cache, positions = native

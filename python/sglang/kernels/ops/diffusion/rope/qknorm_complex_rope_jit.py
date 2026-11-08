@@ -25,7 +25,13 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from sglang.kernels.jit.utils import cache_once, device_guard, load_jit, make_cpp_args
+from sglang.kernels.jit.utils import (
+    cache_once,
+    can_build_jit,
+    device_guard,
+    load_jit,
+    make_cpp_args,
+)
 from sglang.kernels.ops.diffusion.rope.complex_rope_triton import _fuse_real_sin
 from sglang.srt.utils.custom_op import register_custom_op
 
@@ -52,8 +58,11 @@ def _jit_module(fuse_real_sin: bool, copy_v: bool) -> Module:
 @torch.compiler.assume_constant_result
 @cache_once
 def can_use_qknorm_complex_rope_cuda(dtype: torch.dtype, head_dim: int) -> bool:
-    """The CUDA reduction is specialized to BF16, 128-wide heads."""
-    return dtype is torch.bfloat16 and head_dim == _HEAD_DIM
+    """The CUDA reduction is specialized to BF16, 128-wide heads.
+
+    Without a JIT compiler the callers use the Triton kernel instead.
+    """
+    return dtype is torch.bfloat16 and head_dim == _HEAD_DIM and can_build_jit()
 
 
 def _rope_real(rope: torch.Tensor) -> torch.Tensor:

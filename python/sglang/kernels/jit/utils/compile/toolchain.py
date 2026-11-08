@@ -86,6 +86,27 @@ def device_compiler_path() -> str:
     return os.path.join(cuda_home(), "bin", "nvcc")
 
 
+@torch.compiler.assume_constant_result
+@cache_once
+def can_build_jit() -> bool:
+    """Whether the device compiler that JIT builds invoke exists here.
+
+    A runtime without the CUDA toolkit (for example the Windows CUDA wheels of
+    PyTorch) cannot build any JIT kernel. Callers that have an eager or Triton
+    equivalent check this before picking a JIT kernel, so such a machine runs
+    the equivalent instead of failing on the first build.
+    """
+    path = device_compiler_path()
+    if os.path.isfile(path) or os.path.isfile(path + ".exe"):
+        return True
+    logger.warning(
+        "JIT compiler %s not found; kernels with an eager or Triton fallback "
+        "use it instead.",
+        path,
+    )
+    return False
+
+
 @cache_once
 def hgcc_path() -> str:
     """The hgcc compiler, from PATH or the PPU SDK install."""
