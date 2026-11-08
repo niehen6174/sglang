@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from diffusers.utils.torch_utils import maybe_allow_in_graph
 
+from sglang.kernels.jit.utils import can_build_jit
 from sglang.kernels.ops.activation.activation import (
     silu_and_mul_with_activation_rounding,
 )
@@ -107,6 +108,7 @@ class FeedForward(nn.Module):
                 and hidden_states.dtype in (torch.float16, torch.bfloat16)
                 and hidden_states.is_contiguous()
                 and hidden_states.shape[-1] % 32 == 0
+                and can_build_jit()
             ):
                 hidden_states = silu_and_mul_with_activation_rounding(hidden_states)
             elif self.silu_and_mul is not None:
