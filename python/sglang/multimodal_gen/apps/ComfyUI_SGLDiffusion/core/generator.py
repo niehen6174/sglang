@@ -21,7 +21,6 @@ from ..executors.minimax_h3 import (
 from ..executors.qwen_image21 import QwenImage21Executor
 from ..executors.zimage import ZImageExecutor
 from ..options import ATTENTION_DISPLAY, INT8_GEMM_DISPLAY, PLUGIN_KEYS
-from .preflight import check_model_options, check_sgld_options
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +105,9 @@ def _looks_like_gguf(path: str) -> bool:
 
 _NATIVE_MODEL_TYPES = {"FastH3Pipeline": "fast_h3", "VDNH3Pipeline": "vdn_h3"}
 NATIVE_MODEL_TYPES = tuple(_NATIVE_MODEL_TYPES.values())
+# Native directories SGLDNativeModelLoader accepts. Z-Image stays out of
+# NATIVE_MODEL_TYPES: its ComfyUI single files still load through SGLDUNETLoader.
+_DIRECTORY_MODEL_TYPES = {**_NATIVE_MODEL_TYPES, "ZImagePipeline": "lumina2"}
 
 
 def _apply_cache_mode(executor, plugin: dict) -> None:
@@ -135,12 +137,19 @@ def _worker_env(values: dict):
 def native_model_type(model_dir: str) -> str:
     with open(os.path.join(model_dir, "model_index.json")) as f:
         class_name = json.load(f).get("_class_name")
-    if class_name not in _NATIVE_MODEL_TYPES:
+    if class_name not in _DIRECTORY_MODEL_TYPES:
         raise ValueError(
             f"{model_dir}: native model {class_name!r} is not supported by "
-            f"SGLDNativeModelLoader; supported: {sorted(_NATIVE_MODEL_TYPES)}"
+            f"SGLDNativeModelLoader; supported: {sorted(_DIRECTORY_MODEL_TYPES)}"
         )
-    return _NATIVE_MODEL_TYPES[class_name]
+    return _DIRECTORY_MODEL_TYPES[class_name]
+
+
+def _zimage_unet_config_from_native(model_dir: str) -> dict:
+    """Keys that make ComfyUI pick its ZImage config over the wider Lumina2."""
+    with open(os.path.join(model_dir, "transformer", "config.json")) as f:
+        c = json.load(f)
+    return {"image_model": "lumina2", "dim": c["dim"]}
 
 
 def _h3_unet_config_from_native(model_dir: str) -> dict:
@@ -370,6 +379,11 @@ class SGLDiffusionGenerator:
         # Each sampler step is its own request carrying ComfyUI tensors; a
         # synthetic or request-based warmup has no such inputs to run with.
         kwargs["warmup_mode"] = "off"
+        if sys.platform == "win32":
+            # Windows has no FlashAttention / FlashInfer builds; SDPA is the
+            # attention backend that is always there.
+            if not kwargs.get("attention_backend"):
+                kwargs["attention_backend"] = "torch_sdpa"
         if pipeline_class_name in _H3_MODEL_IDS:
             kwargs.setdefault("model_id", _H3_MODEL_IDS[pipeline_class_name])
         kwargs = self._server_args_kwargs(kwargs)
@@ -574,12 +588,18 @@ class SGLDiffusionGenerator:
         )
 
         if os.path.isdir(model_path):
-            model_config = model_detection.model_config_from_unet_config(
-                _h3_unet_config_from_native(model_path)
-            )
+            if native_model_type(model_path) == "lumina2":
+                unet_config = _zimage_unet_config_from_native(model_path)
+                model_type = "lumina2"
+            else:
+                unet_config = _h3_unet_config_from_native(model_path)
+                model_type = "minimax_h3"
+            model_config = model_detection.model_config_from_unet_config(unet_config)
+            if model_config is None:
+                raise ValueError(f"No ComfyUI model config matches {model_path!r}")
             model_config.set_inference_dtype(torch.bfloat16, None)
             model_config.unet_config["disable_unet_model_creation"] = True
-            return model_config.get_model({}), model_config, "minimax_h3"
+            return model_config.get_model({}), model_config, model_type
 
         sd = _load_state_dict_for_detection(model_path)
         diffusion_model_prefix = model_detection.unet_prefix_from_state_dict(sd)
@@ -652,6 +672,10 @@ class SGLDiffusionGenerator:
                 "SGLDUNETLoader weight_dtype must be 'default': the SGLD worker "
                 "does not use it; select quantization in SGLDOptions instead"
             )
+        # preflight imports the SGLang runtime; keep it off the node-import path
+        # so the nodes still register when the runtime is missing.
+        from .preflight import check_model_options, check_sgld_options
+
         check_sgld_options(sgld_options)
         plugin = {k: sgld_options.pop(k) for k in PLUGIN_KEYS if k in sgld_options}
         from sglang.multimodal_gen.apps.comfyui_worker_patches import (

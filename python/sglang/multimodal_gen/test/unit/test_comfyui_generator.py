@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Process-wide SGLD worker ownership for ComfyUI loaders."""
 
+import json
 import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -9,8 +10,11 @@ import pytest
 import torch
 
 from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.core.generator import (
+    NATIVE_MODEL_TYPES,
     SGLDiffusionGenerator,
     _apply_cache_mode,
+    _zimage_unet_config_from_native,
+    native_model_type,
 )
 from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.options import (
     PLUGIN_KEYS,
@@ -592,3 +596,26 @@ def test_worker_status_is_pushed_to_the_page(monkeypatch) -> None:
     _push_worker_status()
     assert sent[0][0] == "sgld.worker_status"
     assert "123.4 ms" in sent[0][1]["text"]
+
+
+def test_zimage_directory_maps_to_lumina2(tmp_path) -> None:
+    (tmp_path / "model_index.json").write_text(
+        json.dumps({"_class_name": "ZImagePipeline"})
+    )
+    (tmp_path / "transformer").mkdir()
+    (tmp_path / "transformer" / "config.json").write_text(json.dumps({"dim": 3840}))
+    assert native_model_type(str(tmp_path)) == "lumina2"
+    assert _zimage_unet_config_from_native(str(tmp_path)) == {
+        "image_model": "lumina2",
+        "dim": 3840,
+    }
+    # Z-Image single files still go through SGLDUNETLoader.
+    assert "lumina2" not in NATIVE_MODEL_TYPES
+
+
+def test_unknown_native_directory_is_rejected(tmp_path) -> None:
+    (tmp_path / "model_index.json").write_text(
+        json.dumps({"_class_name": "FluxPipeline"})
+    )
+    with pytest.raises(ValueError, match="not supported by SGLDNativeModelLoader"):
+        native_model_type(str(tmp_path))
