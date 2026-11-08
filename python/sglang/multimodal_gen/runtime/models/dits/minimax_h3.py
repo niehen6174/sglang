@@ -7,9 +7,11 @@ contract accepts packed inference keyword arguments and returns packed logits.
 
 from __future__ import annotations
 
+import importlib.util
 import itertools
 import math
 import os
+import sys
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
@@ -18,6 +20,7 @@ import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+from sglang.kernels.jit.utils import cache_once, can_build_jit
 from sglang.kernels.ops.activation.activation import (
     silu_and_mul_with_activation_rounding,
     silu_and_mul_with_activation_rounding_,
@@ -516,6 +519,7 @@ def _silu_mul(hidden: torch.Tensor, *, reuse_input: bool) -> torch.Tensor:
         and hidden.dtype == _BF16_DTYPE
         and hidden.is_contiguous()
         and hidden.shape[-1] % 16 == 0
+        and can_build_jit()
     ):
         if reuse_input:
             return silu_and_mul_with_activation_rounding_(hidden)
@@ -546,6 +550,7 @@ def _apply_qk_norm(
         and q_norm.eps == k_norm.eps
         and not torch.compiler.is_compiling()
         and current_platform.is_cuda()
+        and can_build_jit()
     ):
         fused_inplace_qknorm(
             q,
@@ -629,13 +634,26 @@ def _apply_rope_cos_sin(
     return torch.cat((x_rot, x_pass), dim=-1)
 
 
+@torch.compiler.assume_constant_result
+@cache_once
+def _has_sgl_kernel() -> bool:
+    """sgl_kernel publishes no Windows build; elsewhere it may be absent too."""
+    return (
+        sys.platform != "win32" and importlib.util.find_spec("sgl_kernel") is not None
+    )
+
+
 def _apply_rope_qk(
     q: torch.Tensor,
     k: torch.Tensor,
     cos_sin_cache: torch.Tensor,
     positions: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if not q.is_cuda:
+    if q.is_cuda and not _has_sgl_kernel():
+        # The same NeoX rotation sgl_kernel applies, with the cache rows
+        # gathered by position. Not bit-identical to the kernel.
+        cos_sin_cache = cos_sin_cache.index_select(0, positions.long())
+    if not q.is_cuda or not _has_sgl_kernel():
         half = cos_sin_cache.shape[-1] // 2
         cos_half, sin_half = cos_sin_cache.split(half, dim=-1)
         cos = torch.cat((cos_half, cos_half), dim=-1).unsqueeze(1)
