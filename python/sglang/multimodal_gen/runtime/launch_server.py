@@ -463,8 +463,15 @@ def launch_http_server_only(
     # set for endpoints to access global_server_args
     set_global_server_args(server_args)
     app = create_app(server_args, worker_pids=worker_pids, disagg_server=disagg_server)
+    uvicorn_kwargs = {}
+    if sys.platform == "win32":
+        # Uvicorn picks the Proactor loop on Windows, and pyzmq's asyncio
+        # sockets need a selector loop: the offline request broker would exit
+        # on its first recv.
+        uvicorn_kwargs["loop"] = "asyncio:SelectorEventLoop"
     uvicorn.run(
         app,
+        **uvicorn_kwargs,
         use_colors=True,
         log_level=server_args.log_level,
         host=server_args.host,

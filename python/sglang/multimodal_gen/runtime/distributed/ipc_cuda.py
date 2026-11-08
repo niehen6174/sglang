@@ -151,18 +151,28 @@ def _spill_one(value: Any) -> Any:
         try:
             return CudaIpcRef.from_tensor(value)
         except RuntimeError as exc:
-            # cudaMallocAsync (ComfyUI default) cannot export IPC handles.
-            # Leave the tensor in place so pickle falls back to a host copy.
+            # cudaMallocAsync (ComfyUI default) cannot export IPC handles, and
+            # expandable_segments refuses to unless
+            # TORCH_CUDA_EXPANDABLE_SEGMENTS_IPC=1. Leave the tensor in place
+            # so pickle falls back to a host copy.
             msg = str(exc)
-            if "shareIpcHandle" not in msg and "cudaMallocAsync" not in msg:
+            if not any(
+                marker in msg
+                for marker in (
+                    "shareIpcHandle",
+                    "cudaMallocAsync",
+                    "expandable_segments",
+                    "IPC handles are disabled",
+                )
+            ):
                 raise
             global _WARNED_ASYNC_ALLOC
             if not _WARNED_ASYNC_ALLOC:
                 _WARNED_ASYNC_ALLOC = True
                 logger.warning(
                     "CUDA IPC export failed (%s); falling back to a host pickle "
-                    "copy. ComfyUI's default cudaMallocAsync pool cannot export "
-                    "IPC handles.",
+                    "copy. cudaMallocAsync and expandable_segments allocations "
+                    "cannot export IPC handles.",
                     exc,
                 )
     return value

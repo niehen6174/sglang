@@ -340,6 +340,48 @@ class TestOotRuntimeHooks(unittest.TestCase):
             else:
                 self.assertNotIn("device_id", kwargs)
 
+    def _init_without_nccl(self, world_size):
+        platform = MagicMock(device_name="cuda")
+        platform.is_cuda_alike.return_value = True
+        platform.get_torch_distributed_backend_str.return_value = "gloo"
+        platform.supports_distributed_device_id.return_value = True
+        with (
+            patch.object(runtime_platforms, "_current_platform", platform),
+            patch.object(
+                parallel_state, "_WORLD", SimpleNamespace(world_size=world_size)
+            ),
+            patch.object(
+                parallel_state.torch.distributed,
+                "is_nccl_available",
+                return_value=False,
+            ),
+            patch.object(
+                parallel_state.torch.distributed, "is_initialized", return_value=False
+            ),
+            patch.object(
+                parallel_state.torch.distributed, "init_process_group"
+            ) as init_process_group,
+            patch.object(
+                parallel_state.torch.distributed,
+                "get_world_size",
+                return_value=world_size,
+            ),
+            patch.object(parallel_state, "_sync_srt_world_group"),
+        ):
+            parallel_state.init_distributed_environment(
+                world_size=world_size, device_id=object()
+            )
+        return init_process_group
+
+    def test_cuda_without_nccl_runs_one_rank_on_gloo(self):
+        # Windows CUDA wheels of PyTorch ship without NCCL.
+        init_process_group = self._init_without_nccl(world_size=1)
+        kwargs = init_process_group.call_args.kwargs
+        self.assertEqual(kwargs["backend"], "gloo")
+        self.assertNotIn("device_id", kwargs)
+        with self.assertRaisesRegex(RuntimeError, "needs NCCL"):
+            self._init_without_nccl(world_size=2)
+
 
 if __name__ == "__main__":
     unittest.main()
