@@ -131,7 +131,9 @@ def get_lock(model_name_or_path: str | Path, cache_dir: str | None = None):
     # snapshot paths can exceed that even though the full path is valid.
     # The digest is already collision-resistant, so fall back to it alone
     # while preserving the historical name for ordinary paths.
-    if len(os.fsencode(lock_file_name)) > 255:
+    # Windows paths also carry a drive colon and backslashes, which are not
+    # valid in a file name.
+    if os.name == "nt" or len(os.fsencode(lock_file_name)) > 255:
         lock_file_name = hash_name + ".lock"
     # mode 0o666 is required for the filelock to be shared across users
     lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name), mode=0o666)

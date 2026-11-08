@@ -393,6 +393,11 @@ class Platform:
     @lru_cache(maxsize=1)
     def get_torch_distributed_backend_str(self) -> str:
         if self.is_cuda_alike():
+            # Windows CUDA wheels of PyTorch ship without NCCL. Gloo is enough to
+            # form the single-rank group; init_distributed_environment rejects
+            # larger worlds on such builds.
+            if not torch.distributed.is_nccl_available():
+                return "gloo"
             return "nccl"
         elif self.is_npu():
             return "hccl"

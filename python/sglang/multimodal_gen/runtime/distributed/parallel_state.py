@@ -289,6 +289,19 @@ def init_distributed_environment(
             "Using %s backend for %s platform", backend, current_platform.device_name
         )
 
+    # Windows CUDA wheels of PyTorch have no NCCL; the platform then picks Gloo
+    # to form a single-rank group (see get_torch_distributed_backend_str).
+    gloo_without_nccl = (
+        backend == "gloo"
+        and current_platform.is_cuda_alike()
+        and not torch.distributed.is_nccl_available()
+    )
+    if gloo_without_nccl and world_size > 1:
+        raise RuntimeError(
+            "This PyTorch build has no NCCL (e.g. the Windows CUDA wheels); "
+            "multi-GPU diffusion needs NCCL. Run with a single GPU."
+        )
+
     logger.debug(
         "world_size=%d rank=%d local_rank=%d "
         "distributed_init_method=%s backend=%s timeout=%s",
@@ -305,9 +318,11 @@ def init_distributed_environment(
             "distributed environment"
         )
 
+        # Gloo rejects the CUDA device_id that binds an NCCL communicator.
         extra_args = (
             dict(device_id=device_id)
-            if current_platform.supports_distributed_device_id()
+            if not gloo_without_nccl
+            and current_platform.supports_distributed_device_id()
             else {}
         )
 
