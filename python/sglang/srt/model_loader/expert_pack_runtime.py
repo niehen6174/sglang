@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import importlib.metadata
 import json
@@ -15,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from sglang import _file_lock as fcntl
 from sglang.srt.arg_groups.model_override_base import resolving_view
 from sglang.srt.arg_groups.overrides import declare_resolution
 

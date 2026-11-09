@@ -22,11 +22,12 @@ from sglang.srt.layers.quantization.compressed_tensors.schemes import (
 )
 from sglang.srt.layers.quantization.utils import requantize_with_max_scale
 from sglang.srt.utils import is_cuda
+from sglang.srt.utils.device import is_sgl_kernel_available
 
 __all__ = ["CompressedTensorsW8A8Int8", "NPUCompressedTensorsW8A8Int8"]
 
 _is_cuda = is_cuda()
-if _is_cuda:
+if _is_cuda and is_sgl_kernel_available():
     from sgl_kernel import int8_scaled_mm
 
 

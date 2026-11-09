@@ -6,13 +6,17 @@ import json
 import logging
 import math
 import os
-import resource
 import time
 import weakref
 from collections import defaultdict
 from functools import lru_cache
 
 import torch
+
+try:
+    import resource
+except ModuleNotFoundError:  # Windows; the mlock helpers below are Linux-only.
+    resource = None
 
 from sglang.srt.environ import envs
 from sglang.srt.mem_cache.storage.mmap import alloc_mmap

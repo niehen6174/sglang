@@ -67,6 +67,7 @@ methods and dispatch is resolved on first call.
 from __future__ import annotations
 
 import functools
+import importlib.util
 import logging
 import types
 from abc import ABC, abstractmethod
@@ -163,6 +164,12 @@ _PLATFORM_METHODS: Dict[str, Tuple[str, ...]] = {
     "mlu": ("forward_mlu",),
     "cpu": ("forward_cpu",),
 }
+
+
+@functools.lru_cache(maxsize=1)
+def _has_sgl_kernel() -> bool:
+    """Whether sgl_kernel is installed, without importing it."""
+    return importlib.util.find_spec("sgl_kernel") is not None
 
 
 @functools.lru_cache(maxsize=1)
@@ -612,7 +619,15 @@ class BaseFusedOp(nn.Module, ABC):
                     return getattr(self, BACKEND_METHODS[backend])
 
         # 5) Platform-specific forward; 6) native fallback.
-        method = self._platform_method(_platform_key())
+        return self._platform_forward()
+
+    def _platform_forward(self) -> Callable:
+        """Steps 5-6: the platform forward, else the native reference."""
+        key = _platform_key()
+        if key == "cuda" and not _has_sgl_kernel():
+            # The CUDA forwards call sgl_kernel, which has no Windows build.
+            return self.forward_native
+        method = self._platform_method(key)
         return method if method is not None else self.forward_native
 
     def _forward_oot(self, *args, **kwargs):
@@ -627,8 +642,7 @@ class BaseFusedOp(nn.Module, ABC):
                 if _trace_enabled:
                     _record_trace(self, backend.value, args, kwargs)
                 return result
-        method = self._platform_method(_platform_key())
-        method = method or self.forward_native
+        method = self._platform_forward()
         result = method(*args, **kwargs)
         if _trace_enabled:
             _record_trace(self, _dispatch_label(method), args, kwargs)

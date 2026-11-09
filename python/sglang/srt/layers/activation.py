@@ -46,6 +46,7 @@ from sglang.srt.utils import (
     is_xpu,
 )
 from sglang.srt.utils.common import dynamic_import
+from sglang.srt.utils.device import is_sgl_kernel_available
 
 _is_cuda = is_cuda()
 _is_musa = is_musa()
@@ -57,9 +58,10 @@ _is_xpu = is_xpu()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
 if _is_cuda:
-    from sgl_kernel import gelu_and_mul as _sgl_gelu_and_mul
-    from sgl_kernel import gelu_tanh_and_mul as _sgl_gelu_tanh_and_mul
-    from sgl_kernel import silu_and_mul as _sgl_silu_and_mul
+    if is_sgl_kernel_available():
+        from sgl_kernel import gelu_and_mul as _sgl_gelu_and_mul
+        from sgl_kernel import gelu_tanh_and_mul as _sgl_gelu_tanh_and_mul
+        from sgl_kernel import silu_and_mul as _sgl_silu_and_mul
 
     from sglang.kernels.ops.activation.activation import (
         gelu_and_mul as _jit_gelu_and_mul,

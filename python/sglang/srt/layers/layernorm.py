@@ -48,6 +48,7 @@ from sglang.srt.utils import (
     is_sm100_supported,
     is_xpu,
 )
+from sglang.srt.utils.device import is_sgl_kernel_available
 
 _is_cuda = is_cuda()
 _is_flashinfer_available = is_flashinfer_available()
@@ -103,12 +104,13 @@ if _is_cuda or _is_xpu or _is_musa:
         _flashinfer_layernorm_available = False
         _flashinfer_rmsnorm_quant_available = False
 
-    from sgl_kernel import (
-        fused_add_rmsnorm,
-        gemma_fused_add_rmsnorm,
-        gemma_rmsnorm,
-        rmsnorm,
-    )
+    if is_sgl_kernel_available():
+        from sgl_kernel import (
+            fused_add_rmsnorm,
+            gemma_fused_add_rmsnorm,
+            gemma_rmsnorm,
+            rmsnorm,
+        )
 _has_aiter_layer_norm = False
 _has_vllm_rms_norm = False
 _has_rocm_triton_gemma_rms_norm = False

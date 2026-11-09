@@ -8,7 +8,6 @@ directory must be trusted: cached object files are loaded into the process.
 """
 
 import ctypes
-import fcntl
 import hashlib
 import logging
 import os
@@ -21,6 +20,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Hashable, TypeAlias
 
+from sglang import _file_lock as fcntl
 from sglang.kernels.arch import current_arch
 
 logger = logging.getLogger(__name__)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import logging
 import os
 import pathlib
@@ -13,6 +12,7 @@ from typing import TYPE_CHECKING, List, Tuple
 
 import torch
 
+from sglang import _file_lock as fcntl
 from sglang.kernels.jit.utils.arch import get_default_target_flags
 from sglang.kernels.jit.utils.common import is_hip_runtime, is_sail_runtime
 from sglang.kernels.jit.utils.compile import cache, ninja, toolchain

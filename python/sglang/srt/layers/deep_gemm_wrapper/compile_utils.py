@@ -1,4 +1,3 @@
-import fcntl
 import logging
 import math
 import os
@@ -12,6 +11,7 @@ from typing import Dict, List, Tuple
 import torch
 from tqdm import tqdm
 
+from sglang import _file_lock as fcntl
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     disable_symmetric_memory_context,
     restore_symmetric_memory_context,

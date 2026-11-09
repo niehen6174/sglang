@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import importlib
 import importlib.util
@@ -20,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Iterator, Literal, Mapping
+
+from sglang import _file_lock as fcntl
 
 try:
     import tomllib

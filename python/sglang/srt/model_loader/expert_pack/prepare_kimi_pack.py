@@ -5,10 +5,11 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import shutil
 from pathlib import Path
+
+from sglang import _file_lock as fcntl
 
 try:
     from .kimi_ggml import (

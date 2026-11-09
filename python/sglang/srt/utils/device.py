@@ -74,6 +74,7 @@ __all__ = [
     "use_intel_amx_backend",
     "xpu_has_xmx_support",
     "is_flashinfer_available",
+    "is_sgl_kernel_available",
     "is_nvidia_cublas_version_ge_12_9",
     "empty_device_cache",
     "get_available_gpu_memory",
@@ -397,6 +398,16 @@ def xpu_has_xmx_support():
         # currently only PVC/LNL/BMG supports F64, so we only support these now
         return torch.xpu.get_device_properties().has_fp64
     return False
+
+
+@lru_cache(maxsize=1)
+def is_sgl_kernel_available() -> bool:
+    """Whether the sgl_kernel extension is installed.
+
+    It publishes no Windows build. Code with an equivalent path uses that
+    path when this is False instead of failing on import.
+    """
+    return find_spec("sgl_kernel") is not None
 
 
 @lru_cache(maxsize=1)

@@ -31,6 +31,7 @@ from sglang.srt.layers.quantization.base_config import (
 from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 from sglang.srt.layers.utils.common import set_weight_attrs
 from sglang.srt.utils import is_cuda, is_hip, is_musa, is_npu, is_xpu
+from sglang.srt.utils.device import is_sgl_kernel_available
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
@@ -46,13 +47,14 @@ _is_npu = is_npu()
 _musa_apply_gguf_moe_weights = None
 
 if _is_cuda:
-    from sgl_kernel import moe_sum
-    from sgl_kernel.quantization import (
-        ggml_dequantize,
-        ggml_moe_a8,
-        ggml_mul_mat_a8,
-        ggml_mul_mat_vec_a8,
-    )
+    if is_sgl_kernel_available():
+        from sgl_kernel import moe_sum
+        from sgl_kernel.quantization import (
+            ggml_dequantize,
+            ggml_moe_a8,
+            ggml_mul_mat_a8,
+            ggml_mul_mat_vec_a8,
+        )
 
     from sglang.kernels.ops.activation.activation import gelu_and_mul, silu_and_mul
     from sglang.kernels.ops.moe.gguf_moe_vec import gguf_moe_a8_vec as ggml_moe_a8_vec

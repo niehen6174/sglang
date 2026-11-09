@@ -42,6 +42,7 @@ from sglang.srt.utils import (
     is_xpu,
 )
 from sglang.srt.utils.custom_op import register_custom_op
+from sglang.srt.utils.device import is_sgl_kernel_available
 
 from .fused_moe_triton_config import get_config_dtype_str, try_get_optimal_moe_config
 from .moe_align_block_size import moe_align_block_size
@@ -59,7 +60,8 @@ _is_musa = is_musa()
 
 
 if _is_cuda:
-    from sgl_kernel import moe_sum_reduce
+    if is_sgl_kernel_available():
+        from sgl_kernel import moe_sum_reduce
 
     from sglang.kernels.ops.activation.activation import (
         gelu_and_mul,

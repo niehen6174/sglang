@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from sglang.kernels.jit.utils import can_build_jit
 from sglang.kernels.ops.diffusion import (
     can_use_fused_inplace_qknorm_rope,
     can_use_fused_scale_residual_norm_scale_shift_triton,
@@ -42,6 +43,7 @@ from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.platforms.aiter import USE_AITER
 from sglang.multimodal_gen.runtime.utils.common import get_bool_env_var
 from sglang.srt.utils.custom_op import register_custom_op
+from sglang.srt.utils.device import is_sgl_kernel_available
 
 # An opaque op to torch.compile, as srt.models.utils registers it: a bare JIT
 # launch graph-breaks every layer that normalizes q/k.
@@ -56,7 +58,9 @@ _is_xpu = current_platform.is_xpu()
 _use_rocm_flydsl = get_bool_env_var("SGLANG_USE_ROCM_FLYDSL")
 _has_attentions = False
 
-if _is_cuda or _is_xpu:
+# sgl_kernel publishes no Windows build; RMSNorm then runs its eager reference.
+_has_sgl_kernel = _is_xpu or (_is_cuda and is_sgl_kernel_available())
+if _has_sgl_kernel:
     from sgl_kernel import fused_add_rmsnorm, rmsnorm
 
 if _is_npu:
@@ -149,6 +153,7 @@ class RMSNorm(CustomOp):
                 x_2d.dtype in (torch.float16, torch.bfloat16)
                 and self.weight.dtype == x_2d.dtype
                 and is_supported_rmsnorm_hidden_size(x_2d.shape[-1])
+                and can_build_jit()
             ):
                 out = torch.empty_like(x_2d)
                 jit_rmsnorm(
@@ -177,6 +182,9 @@ class RMSNorm(CustomOp):
         elif self.variance_size_override is not None:
             return self.forward_native(x, residual)
         elif residual is not None:
+            if not _has_sgl_kernel:
+                out, residual = self.forward_native(x, residual)
+                return out.view(shape), residual.view(residual_shape)
             fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
             return x.view(shape), residual.view(residual_shape)
         else:
@@ -184,6 +192,8 @@ class RMSNorm(CustomOp):
                 out = triton_one_pass_rms_norm(
                     x, self.weight.data, self.variance_epsilon
                 )
+            elif not _has_sgl_kernel:
+                out = self.forward_native(x)
             else:
                 out = rmsnorm(x, self.weight.data, self.variance_epsilon)
         out = out.view(shape)
@@ -1060,6 +1070,7 @@ def apply_qk_norm(
         and k_norm.weight.dtype == k.dtype
         and q.is_contiguous()
         and k.is_contiguous()
+        and can_build_jit()
         and can_use_fused_inplace_qknorm(head_dim, q.dtype)
     ):
         fused_inplace_qknorm(

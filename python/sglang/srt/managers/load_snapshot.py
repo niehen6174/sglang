@@ -44,7 +44,6 @@ PULL socket (only one can bind); the other reads plain SHM.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import logging
 import mmap
@@ -57,6 +56,7 @@ import msgspec
 import msgspec.msgpack
 import msgspec.structs
 
+from sglang import _file_lock as fcntl
 from sglang.srt.environ import envs
 from sglang.srt.runtime_context import get_parallel, get_serving
 from sglang.srt.utils.network import (

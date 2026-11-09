@@ -31,6 +31,7 @@ from sglang.srt.utils import (
     is_host_cpu_arm64,
     use_intel_amx_backend,
 )
+from sglang.srt.utils.device import is_sgl_kernel_available
 from sglang.srt.utils.patch_torch import register_fake_if_exists
 
 if TYPE_CHECKING:
@@ -41,7 +42,7 @@ _is_cpu_amx_available = cpu_has_amx_support()
 _is_cpu = is_cpu()
 _is_cpu_arm64 = is_host_cpu_arm64()
 
-if _is_cuda:
+if _is_cuda and is_sgl_kernel_available():
     from sgl_kernel import int8_scaled_mm
 
     @register_fake_if_exists("sgl_kernel::int8_scaled_mm")
@@ -179,7 +180,6 @@ class W8A8Int8LinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-
         weight_loader = extra_weight_attrs.get("weight_loader")
         self.logical_widths = output_partition_sizes
 

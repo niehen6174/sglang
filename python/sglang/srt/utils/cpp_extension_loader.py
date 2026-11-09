@@ -8,7 +8,6 @@ lock can only be stale and is removed before loading.
 
 from __future__ import annotations
 
-import fcntl
 import logging
 import os
 import shutil
@@ -18,6 +17,8 @@ from pathlib import Path
 from typing import Any, Iterator, Sequence
 
 import torch
+
+from sglang import _file_lock as fcntl
 
 logger = logging.getLogger(__name__)
 
