@@ -30,6 +30,11 @@ if _sys.platform == "darwin" and _platform.machine() == "arm64":
 
     _install_platform_stubs()
 
+if _sys.platform == "win32":
+    from sglang._windows_stubs import install_windows_stubs as _install_windows_stubs
+
+    _install_windows_stubs()
+
 from sglang._lazy_import import LazyImport
 from sglang.lang.api import (
     Runtime,
