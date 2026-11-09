@@ -10,6 +10,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from sglang._windows_stubs import sgl_kernel_available
+from sglang.kernels.jit.utils import can_build_jit
 from sglang.kernels.ops.diffusion import (
     WAN_ROCM_FLYDSL_NORM_SCALE_SHIFT,
     can_use_fused_inplace_qknorm_rope,
@@ -57,6 +59,9 @@ _is_xpu = current_platform.is_xpu()
 _use_rocm_flydsl = get_bool_env_var("SGLANG_USE_ROCM_FLYDSL")
 _has_attentions = False
 
+# sgl_kernel publishes no Windows build; there it is a stub and RMSNorm runs its
+# eager reference instead.
+_has_sgl_kernel = _is_xpu or (_is_cuda and sgl_kernel_available())
 if _is_cuda or _is_xpu:
     from sgl_kernel import fused_add_rmsnorm, rmsnorm
 
@@ -150,6 +155,7 @@ class RMSNorm(CustomOp):
                 x_2d.dtype in (torch.float16, torch.bfloat16)
                 and self.weight.dtype == x_2d.dtype
                 and is_supported_rmsnorm_hidden_size(x_2d.shape[-1])
+                and can_build_jit()
             ):
                 out = torch.empty_like(x_2d)
                 jit_rmsnorm(
@@ -178,6 +184,9 @@ class RMSNorm(CustomOp):
         elif self.variance_size_override is not None:
             return self.forward_native(x, residual)
         elif residual is not None:
+            if not _has_sgl_kernel:
+                out, residual = self.forward_native(x, residual)
+                return out.view(shape), residual.view(residual_shape)
             fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
             return x.view(shape), residual.view(residual_shape)
         else:
@@ -185,6 +194,8 @@ class RMSNorm(CustomOp):
                 out = triton_one_pass_rms_norm(
                     x, self.weight.data, self.variance_epsilon
                 )
+            elif not _has_sgl_kernel:
+                out = self.forward_native(x)
             else:
                 out = rmsnorm(x, self.weight.data, self.variance_epsilon)
         out = out.view(shape)
@@ -1073,6 +1084,7 @@ def apply_qk_norm(
         and k_norm.weight.dtype == k.dtype
         and q.is_contiguous()
         and k.is_contiguous()
+        and can_build_jit()
         and can_use_fused_inplace_qknorm(head_dim, q.dtype)
     ):
         fused_inplace_qknorm(
