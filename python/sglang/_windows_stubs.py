@@ -202,12 +202,29 @@ def sgl_kernel_available() -> bool:
     return not _missing("sgl_kernel")
 
 
+def _tolerate_console_encoding() -> None:
+    """Replace characters the console code page cannot encode.
+
+    A Chinese Windows console is GBK, which has no "✓"; logging such a message
+    would print a ``UnicodeEncodeError`` traceback that looks like a crash.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 def install_windows_stubs() -> None:
     """Install whichever of the stubs this interpreter needs. Idempotent."""
     global _installed
     if _installed:
         return
     _installed = True
+    if sys.platform == "win32":
+        _tolerate_console_encoding()
     if _missing("sgl_kernel"):
         _install_sgl_kernel()
     if _missing("resource"):
