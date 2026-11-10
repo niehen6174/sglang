@@ -17,8 +17,9 @@ def test_message_is_kept() -> None:
 
 def test_bare_assert_names_type_and_site() -> None:
     def capture():
-        graph = None
-        assert graph is not None
+        # A bare `assert` raises this (pytest rewrites asserts in tests to
+        # carry a message, so raise it directly).
+        raise AssertionError()
 
     try:
         capture()
