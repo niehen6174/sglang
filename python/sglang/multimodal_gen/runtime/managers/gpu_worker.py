@@ -7,6 +7,7 @@ import multiprocessing as mp
 import os
 import tempfile
 import time
+import traceback
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -926,7 +927,7 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
                 logger.warning(OOM_MSG)
             if output_batch is None:
                 output_batch = OutputBatch()
-            output_batch.error = f"Error executing {error_context}: {e}"
+            output_batch.error = f"Error executing {error_context}: {describe_error(e)}"
             self._record_output_peak_memory(output_batch, is_warmup=req.is_warmup)
             # clean cache if OOM
             if not current_platform.is_cpu():
@@ -1851,6 +1852,21 @@ exits and the server stops accepting requests. Restart it.
 """
 
 
+def describe_error(e: BaseException) -> str:
+    """The exception message, or its type and raise site when it has none.
+
+    A bare ``assert`` raises with an empty message, which would otherwise leave
+    callers with "Error executing request None: " and nothing after it.
+    """
+    if str(e):
+        return str(e)
+    text = type(e).__name__
+    frames = traceback.extract_tb(e.__traceback__)
+    if frames:
+        text += f" at {os.path.basename(frames[-1].filename)}:{frames[-1].lineno}"
+    return text
+
+
 def run_scheduler_process(
     local_rank: int,
     rank: int,
@@ -1880,12 +1896,23 @@ def run_scheduler_process(
     from sglang.multimodal_gen.runtime.managers.scheduler import Scheduler
 
     try:
-        scheduler = Scheduler(
-            server_args,
-            gpu_id=rank,
-            port_args=port_args,
-            local_rank=local_rank,
-        )
+        try:
+            scheduler = Scheduler(
+                server_args,
+                gpu_id=rank,
+                port_args=port_args,
+                local_rank=local_rank,
+            )
+        except BaseException as e:
+            # Hand the cause to the launcher; otherwise it only sees the pipe
+            # close and can say no more than "check the worker logs".
+            try:
+                pipe_writer.send(
+                    {"status": "error", "error": f"{type(e).__name__}: {e}"}
+                )
+            except (OSError, ValueError):
+                pass
+            raise
         logger.info(f"Worker {rank}: Scheduler loop started.")
         pipe_writer.send(
             {
