@@ -124,6 +124,7 @@ Reference workflow files are provided in the `workflows/` directory:
 - **`sgld_image2video.json`**: Server-mode image-to-video generation.
 - **`qwen_image21_t2i_sgld.json`**: Qwen-Image-2.1 text-to-image. For reference edit, use the official template with `SGLDUNETLoader`.
 - **`minimax_h3_t2v_sgld.json`**: MiniMax-H3 T2V / I2VA / FL2VA (`fl2va` DiT).
+- **`minimax_h3_t2v_sgld_int8.json`**: The same graph on the pruned INT8 DiT (`minimax_h3_fl2va_pruned_int8_convrot.safetensors` from `Comfy-Org/MiniMax-H3`), sized for 24–32 GB cards.
 - **`minimax_h3_r2v_sgld.json`**: MiniMax-H3 reference-to-video (`ref2va` DiT).
 - **`minimax_h3_t2v_sgld_upscaler.json`**: H3 two-pass latent upscale (low-res then 3D ×2 refine).
 
