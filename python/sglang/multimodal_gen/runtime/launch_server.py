@@ -185,7 +185,8 @@ def _start_scheduler_processes(
                         ) from error
                     if data["status"] != "ready":
                         raise RuntimeError(
-                            f"{process.name} failed to initialize: {data}"
+                            f"{process.name} failed to initialize: "
+                            f"{data.get('error', data)}"
                         )
                     reader.close()
         except BaseException:
