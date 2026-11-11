@@ -85,7 +85,9 @@ def _restore_gc_thresholds_in_forked_child() -> None:
         gc.set_threshold(*_gc_thresholds)
 
 
-os.register_at_fork(after_in_child=_restore_gc_thresholds_in_forked_child)
+# Windows has no fork; its workers are spawned and start with fresh thresholds.
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_restore_gc_thresholds_in_forked_child)
 
 
 def kill_process_tree(
@@ -101,7 +103,10 @@ def kill_process_tree(
     only in a context where blocking is not acceptable.
     """
     # Remove sigchld handler to avoid spammy logs.
-    if threading.current_thread() is threading.main_thread():
+    if (
+        hasattr(signal, "SIGCHLD")
+        and threading.current_thread() is threading.main_thread()
+    ):
         signal.signal(signal.SIGCHLD, signal.SIG_DFL)
 
     if parent_pid is None:

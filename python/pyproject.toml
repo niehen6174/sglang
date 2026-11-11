@@ -222,7 +222,8 @@ killall_sglang = "sglang.cli.killall:main"
   "cli/_commands/*.json",
   "srt/**/*",
   "kernels/**/*",
-  "multimodal_gen/apps/realtime_webui/**/*"
+  "multimodal_gen/apps/realtime_webui/**/*",
+  "multimodal_gen/apps/ComfyUI_SGLDiffusion/**/*"
 ]
 
 [tool.setuptools.exclude-package-data]

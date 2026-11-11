@@ -7,11 +7,9 @@ contract accepts packed inference keyword arguments and returns packed logits.
 
 from __future__ import annotations
 
-import importlib.util
 import itertools
 import math
 import os
-import sys
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
@@ -20,6 +18,7 @@ import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+from sglang._windows_stubs import sgl_kernel_available
 from sglang.kernels.jit.utils import cache_once, can_build_jit
 from sglang.kernels.ops.activation.activation import (
     silu_and_mul_with_activation_rounding,
@@ -641,10 +640,8 @@ def _apply_rope_cos_sin(
 @torch.compiler.assume_constant_result
 @cache_once
 def _has_sgl_kernel() -> bool:
-    """sgl_kernel publishes no Windows build; elsewhere it may be absent too."""
-    return (
-        sys.platform != "win32" and importlib.util.find_spec("sgl_kernel") is not None
-    )
+    """sgl_kernel publishes no Windows build; there it is a stub."""
+    return sgl_kernel_available()
 
 
 def _apply_rope_qk(

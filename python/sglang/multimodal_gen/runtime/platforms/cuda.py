@@ -16,6 +16,7 @@ import psutil
 import torch
 from typing_extensions import ParamSpec
 
+from sglang._windows_stubs import sgl_kernel_available
 from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.runtime.platforms.interface import (
     AttentionBackendEnum,
@@ -770,6 +771,12 @@ class CudaPlatformBase(Platform):
             target_backend == AttentionBackendEnum.FA
             and not cls._prepare_flash_attention_for_blackwell()
         ):
+            target_backend = AttentionBackendEnum.TORCH_SDPA
+
+        if target_backend == AttentionBackendEnum.FA and not sgl_kernel_available():
+            # FlashAttention ships in sgl_kernel, which has no Windows build.
+            # There sgl_kernel is a stub, so the import check below would pass.
+            logger.info("Cannot use FlashAttention backend without sgl_kernel.")
             target_backend = AttentionBackendEnum.TORCH_SDPA
 
         if target_backend == AttentionBackendEnum.FA:
