@@ -859,6 +859,11 @@ class CudaPlatformBase(Platform):
         flux2_vae_cuda_opt, wan_vae_cuda_opt and minimax_h3_vae_cuda_opt for
         details.
         """
+        from sglang.kernels.jit.utils import can_build_jit
+
+        if not can_build_jit():
+            # The fast paths are mostly JIT kernels; keep the original modules.
+            return vae
         try:
             from sglang.multimodal_gen.runtime.models.vaes.flux2_vae_cuda_opt import (
                 maybe_optimize_autoencoder_kl,

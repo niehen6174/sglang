@@ -6,7 +6,12 @@ import torch
 import triton
 import triton.language as tl
 
-from sglang.kernels.jit.utils import cache_once, load_jit, make_cpp_args
+from sglang.kernels.jit.utils import (
+    cache_once,
+    can_build_jit,
+    load_jit,
+    make_cpp_args,
+)
 from sglang.kernels.kda_kernels import _cuda_source
 from sglang.srt.utils.custom_op import register_custom_op
 
@@ -209,6 +214,10 @@ def _route(residual: torch.Tensor, update: torch.Tensor, gate: torch.Tensor):
     # uses, the existing JIT CUDA kernel is faster at every measured shape.
     if _is_transposed_dense_residual(residual, update, gate):
         return _TRANSPOSED
+    # The contiguous layouts are a JIT CUDA kernel; without a compiler they
+    # stay eager.
+    if not can_build_jit():
+        return None
     if not (residual.is_contiguous() and update.is_contiguous()):
         return None
     mode = _gate_mode(residual, gate)
