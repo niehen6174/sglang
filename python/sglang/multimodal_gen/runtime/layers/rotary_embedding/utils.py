@@ -34,6 +34,56 @@ else:
     flashinfer_apply_rope_inplace = None
 
 
+@functools.cache
+def _comfy_kitchen_rope_available() -> bool:
+    """Whether comfy_kitchen's CUDA interleaved RoPE kernel is loaded.
+
+    ComfyUI installs comfy_kitchen with prebuilt CUDA kernels on every platform,
+    Windows included, where FlashInfer is not available.
+    """
+    try:
+        from comfy_kitchen.registry import registry
+
+        cuda = registry.list_backends().get("cuda") or {}
+    except Exception:
+        return False
+    return (
+        bool(cuda.get("available"))
+        and not cuda.get("disabled")
+        and "apply_rope" in cuda.get("capabilities", ())
+    )
+
+
+def _comfy_kitchen_rope_table(
+    cos_sin_cache: torch.Tensor,
+    positions: Optional[torch.Tensor],
+    bsz: int,
+    seqlen: int,
+) -> torch.Tensor:
+    """cos|sin cache rows -> comfy_kitchen's [B, S, 1, rot/2, 2, 2] FP32 table.
+
+    Memoized on the cache tensor: one request runs every layer with the same
+    cache and positions.
+    """
+    key = (None if positions is None else id(positions), bsz, seqlen)
+    memo = getattr(cos_sin_cache, "_sgld_ck_rope_table", None)
+    if memo is not None and memo[0] == key and memo[1] is positions:
+        return memo[2]
+    half = cos_sin_cache.shape[-1] // 2
+    if positions is None:
+        rows = cos_sin_cache[:seqlen].unsqueeze(0).expand(bsz, -1, -1)
+    else:
+        rows = cos_sin_cache.index_select(0, positions.view(-1).long())
+        rows = rows.view(bsz, seqlen, -1)
+    rows = rows.float()
+    cos, sin = rows[..., :half], rows[..., half:]
+    table = torch.stack((cos, -sin, sin, cos), dim=-1).reshape(
+        bsz, seqlen, 1, half, 2, 2
+    )
+    cos_sin_cache._sgld_ck_rope_table = (key, positions, table)
+    return table
+
+
 def _build_rope_positions(
     offset: int, seq_len: int, batch_size: int, device: torch.device
 ) -> torch.Tensor:
@@ -177,6 +227,21 @@ def apply_flashinfer_rope_qk_inplace(
     )
 
     if not use_flashinfer:
+        if (
+            not is_neox
+            and rope_dim == d
+            and q.is_cuda
+            and q.shape == k.shape
+            and q.dtype in (torch.bfloat16, torch.float16)
+            and q.dtype == k.dtype
+            and not torch.compiler.is_compiling()
+            and _comfy_kitchen_rope_available()
+        ):
+            # One fused kernel instead of a dozen strided torch ops per layer.
+            import comfy_kitchen
+
+            table = _comfy_kitchen_rope_table(cos_sin_cache, positions, bsz, seqlen)
+            return comfy_kitchen.apply_rope(q, k, table)
         if flashinfer_apply_rope_inplace is None:
             _warn_about_missing_flashinfer()
 

@@ -179,3 +179,36 @@ def test_h3_comfy_kitchen_qk_norm_rope_matches_eager(monkeypatch) -> None:
     assert minimax_h3._comfy_kitchen_rope_table(cache, positions) is (
         minimax_h3._comfy_kitchen_rope_table(cache, positions)
     )
+
+
+@cuda
+def test_interleaved_rope_uses_comfy_kitchen_without_flashinfer(monkeypatch) -> None:
+    from sglang.multimodal_gen.runtime.layers.rotary_embedding import utils
+
+    if not utils._comfy_kitchen_rope_available():
+        pytest.skip("comfy_kitchen has no CUDA backend here")
+    monkeypatch.setattr(utils, "flashinfer_apply_rope_inplace", None)
+    torch.manual_seed(0)
+    bsz, seqlen, heads, dim = 2, 96, 4, 128
+    q = torch.randn(bsz, seqlen, heads, dim, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    angles = torch.rand(seqlen, dim // 2, device="cuda") * 10
+    cache = torch.cat((angles.cos(), angles.sin()), dim=-1)
+
+    got_q, got_k = utils.apply_flashinfer_rope_qk_inplace(q, k, cache, is_neox=False)
+
+    def exact(x):
+        x = x.double()
+        cos, sin = (
+            angles.cos().double()[None, :, None],
+            angles.sin().double()[None, :, None],
+        )
+        out = torch.empty_like(x)
+        out[..., ::2] = x[..., ::2] * cos - x[..., 1::2] * sin
+        out[..., 1::2] = x[..., 1::2] * cos + x[..., ::2] * sin
+        return out
+
+    torch.testing.assert_close(got_q.double(), exact(q), rtol=0, atol=2e-2)
+    torch.testing.assert_close(got_k.double(), exact(k), rtol=0, atol=2e-2)
+    # Inputs are not rotated in place, matching the torch fallback.
+    assert not torch.equal(got_q, q)
