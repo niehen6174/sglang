@@ -121,3 +121,16 @@ def test_convrot_int8_jit_reports_the_toolchain_reason(monkeypatch) -> None:
 
     monkeypatch.setattr(convrot_int8_jit, "load_convrot_int8_module", build)
     assert probe() == "no jit"
+
+
+def test_load_jit_refuses_without_running_a_compiler(monkeypatch) -> None:
+    from sglang.kernels.jit.utils.compile import cache, loader
+
+    monkeypatch.setattr(toolchain, "jit_unavailable_reason", lambda: "no compiler")
+
+    def fingerprint(*args, **kwargs):
+        raise AssertionError("must not fingerprint or build")
+
+    monkeypatch.setattr(cache, "compute_build_key", fingerprint)
+    with pytest.raises(RuntimeError, match="no compiler"):
+        loader.load_jit("probe_kernel", cuda_files=["probe.cuh"])
