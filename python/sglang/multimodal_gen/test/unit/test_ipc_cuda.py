@@ -6,14 +6,22 @@ from dataclasses import dataclass
 import pytest
 import torch
 
+from sglang.multimodal_gen.runtime.distributed import ipc_cuda
 from sglang.multimodal_gen.runtime.distributed.ipc_cuda import (
     CudaIpcRef,
     _map_tree,
     attach_cuda_tensors,
+    cuda_ipc_enabled,
     detach_cuda_tensors,
     materialize_cuda_refs,
     spill_cuda_tensors,
 )
+
+
+@pytest.fixture(autouse=True)
+def _cuda_ipc_on(monkeypatch):
+    # These tests exercise the IPC path; the platform default is covered below.
+    monkeypatch.setenv("SGLANG_DIFFUSION_CUDA_IPC", "1")
 
 
 def _require_cuda() -> None:
@@ -154,3 +162,35 @@ def test_tree_walk_reaches_tensors_nested_in_req_extra() -> None:
         "output": ["ref"],
     }
     assert holder.extra["comfyui_control"]["input"][0] is residual
+
+
+@pytest.mark.parametrize(
+    ("platform", "env", "expected"),
+    [
+        ("linux", None, True),
+        ("win32", None, False),
+        ("win32", "1", True),
+        ("linux", "0", False),
+        ("linux", "", True),
+    ],
+)
+def test_cuda_ipc_platform_default(monkeypatch, platform, env, expected) -> None:
+    monkeypatch.setattr(ipc_cuda.sys, "platform", platform)
+    if env is None:
+        monkeypatch.delenv("SGLANG_DIFFUSION_CUDA_IPC", raising=False)
+    else:
+        monkeypatch.setenv("SGLANG_DIFFUSION_CUDA_IPC", env)
+    assert cuda_ipc_enabled() is expected
+
+
+def test_without_ipc_tensors_pickle_through_host(monkeypatch) -> None:
+    _require_cuda()
+    monkeypatch.setenv("SGLANG_DIFFUSION_CUDA_IPC", "0")
+    latents = torch.randn(1, 16, 8, 8, device="cuda", dtype=torch.bfloat16)
+    batch = {"latents": latents, "timesteps": [torch.ones(1, device="cuda")]}
+    spilled = spill_cuda_tensors(batch)
+    assert spilled is batch and spilled["latents"] is latents
+    restored = materialize_cuda_refs(pickle.loads(pickle.dumps(spilled)))
+    assert restored["latents"].is_cuda
+    assert torch.equal(restored["latents"], latents)
+    assert torch.equal(restored["timesteps"][0], batch["timesteps"][0])
