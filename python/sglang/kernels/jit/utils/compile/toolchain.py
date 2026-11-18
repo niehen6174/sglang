@@ -17,6 +17,7 @@ import logging
 import os
 import pathlib
 import shutil
+import sys
 from typing import List, Tuple
 
 import torch
@@ -86,23 +87,44 @@ def device_compiler_path() -> str:
     return os.path.join(cuda_home(), "bin", "nvcc")
 
 
+@cache_once
+def jit_unavailable_reason() -> str | None:
+    """Why JIT kernels cannot be built here, or None when they can.
+
+    Two cases rule the build out before it starts:
+
+    * Native Windows. The generated ``build.ninja`` is written for a POSIX
+      host compiler (``c++``, ``-fPIC``, ``-shared``, ``lib64``), so a CUDA
+      toolkit on PATH is not enough: the first build would fail inside a
+      request. Windows is refused even when ``nvcc`` is present.
+    * No device compiler, for example the CUDA wheels of PyTorch without the
+      CUDA toolkit.
+    """
+    if sys.platform == "win32":
+        return (
+            "JIT builds are not supported on native Windows (the build rules "
+            "target a POSIX compiler), even with the CUDA toolkit installed"
+        )
+    path = device_compiler_path()
+    if not os.path.isfile(path):
+        return f"JIT compiler {path} not found"
+    return None
+
+
 @torch.compiler.assume_constant_result
 @cache_once
 def can_build_jit() -> bool:
-    """Whether the device compiler that JIT builds invoke exists here.
+    """Whether JIT kernels can be built here; see `jit_unavailable_reason`.
 
-    A runtime without the CUDA toolkit (for example the Windows CUDA wheels of
-    PyTorch) cannot build any JIT kernel. Callers that have an eager or Triton
-    equivalent check this before picking a JIT kernel, so such a machine runs
-    the equivalent instead of failing on the first build.
+    Callers that have an eager or Triton equivalent check this before picking
+    a JIT kernel, so such a machine runs the equivalent instead of failing on
+    the first build.
     """
-    path = device_compiler_path()
-    if os.path.isfile(path) or os.path.isfile(path + ".exe"):
+    reason = jit_unavailable_reason()
+    if reason is None:
         return True
     logger.warning(
-        "JIT compiler %s not found; kernels with an eager or Triton fallback "
-        "use it instead.",
-        path,
+        "%s; kernels with an eager or Triton fallback use it instead.", reason
     )
     return False
 
