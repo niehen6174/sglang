@@ -661,6 +661,86 @@ def _has_sgl_kernel() -> bool:
     )
 
 
+@torch.compiler.assume_constant_result
+@cache_once
+def _comfy_kitchen_qknorm_rope() -> bool:
+    """Whether comfy_kitchen's CUDA QK RMSNorm + split-half RoPE kernel is loaded.
+
+    ComfyUI installs comfy_kitchen with prebuilt CUDA kernels on every platform,
+    including Windows, where sglang's JIT QK-norm/RoPE kernel cannot be built.
+    Without either, the norm and the rotation run as a dozen torch ops per layer.
+    """
+    if torch.version.hip is not None:
+        # ROCm keeps its own bit-exact QK-norm/RoPE path.
+        return False
+    try:
+        from comfy_kitchen.registry import registry
+
+        cuda = registry.list_backends().get("cuda") or {}
+    except Exception:
+        return False
+    return (
+        bool(cuda.get("available"))
+        and not cuda.get("disabled")
+        and "rms_rope_split_half_" in cuda.get("capabilities", ())
+    )
+
+
+def _comfy_kitchen_rope_table(
+    cos_sin_cache: torch.Tensor, positions: torch.Tensor
+) -> torch.Tensor:
+    """[S, rot] cos|sin cache rows -> comfy_kitchen's [1, S, 1, rot/2, 2, 2] table.
+
+    Built once per RoPE cache: the cache is request-static and shared by all
+    layers, so the table is memoized on the cache tensor.
+    """
+    memo = getattr(cos_sin_cache, "_sgld_ck_rope_table", None)
+    if memo is not None and memo[0] is positions:
+        return memo[1]
+    rows = cos_sin_cache.index_select(0, positions.long())
+    half = rows.shape[-1] // 2
+    cos, sin = rows[:, :half], rows[:, half:]
+    table = torch.stack((cos, -sin, sin, cos), dim=-1).reshape(
+        1, rows.shape[0], 1, half, 2, 2
+    )
+    cos_sin_cache._sgld_ck_rope_table = (positions, table)
+    return table
+
+
+def _comfy_kitchen_qk_norm_rope_(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    q_norm: nn.RMSNorm,
+    k_norm: nn.RMSNorm,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+) -> bool:
+    """Run QK RMSNorm + RoPE in place with comfy_kitchen; False if it does not apply."""
+    if not (
+        q.is_cuda
+        and q.dtype == k.dtype == cos_sin_cache.dtype == _BF16_DTYPE
+        and q.stride(-1) == k.stride(-1) == 1
+        and q_norm.eps is not None
+        and q_norm.eps == k_norm.eps
+        and not torch.compiler.is_compiling()
+        and _comfy_kitchen_qknorm_rope()
+    ):
+        return False
+    import comfy_kitchen
+
+    table = _comfy_kitchen_rope_table(cos_sin_cache, positions)
+    comfy_kitchen.rms_rope_split_half_(
+        q.unsqueeze(0),
+        k.unsqueeze(0),
+        table,
+        q_norm.weight.detach().to(q.dtype),
+        k_norm.weight.detach().to(k.dtype),
+        epsilon=q_norm.eps,
+        rot_dim=cos_sin_cache.shape[-1],
+    )
+    return True
+
+
 def _apply_rope_qk(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1741,7 +1821,9 @@ class MiniMaxH3Attention(nn.Module):
                     rope_dim=cos_sin_cache.shape[-1],
                     round_norm_before_rope=True,
                 )
-            else:
+            elif not _comfy_kitchen_qk_norm_rope_(
+                q, k, self.q_norm, self.k_norm, cos_sin_cache, positions
+            ):
                 q, k = _apply_qk_norm_rope(
                     q,
                     k,
