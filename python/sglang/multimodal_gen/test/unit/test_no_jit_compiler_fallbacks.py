@@ -13,21 +13,32 @@ from sglang.kernels.kda_kernels import residual_gate_add_jit
 from sglang.multimodal_gen.runtime.models.dits import minimax_h3
 
 
-def test_can_build_jit_requires_the_device_compiler(tmp_path, monkeypatch) -> None:
-    probe = toolchain.can_build_jit.__wrapped__
+def test_jit_requires_the_device_compiler(tmp_path, monkeypatch) -> None:
+    probe = toolchain.jit_unavailable_reason.__wrapped__
     nvcc = tmp_path / "nvcc"
+    monkeypatch.setattr(toolchain.sys, "platform", "linux")
     monkeypatch.setattr(toolchain, "device_compiler_path", lambda: str(nvcc))
-    assert probe() is False
+    assert "not found" in probe()
     nvcc.write_text("")
-    assert probe() is True
+    assert probe() is None
 
 
-def test_windows_compiler_name_is_accepted(tmp_path, monkeypatch) -> None:
+def test_jit_is_refused_on_windows_even_with_nvcc(tmp_path, monkeypatch) -> None:
+    # A CUDA toolkit on PATH used to enable JIT on Windows, where the POSIX
+    # build rules then failed the first sampling step.
+    probe = toolchain.jit_unavailable_reason.__wrapped__
+    nvcc = tmp_path / "nvcc.exe"
+    nvcc.write_text("")
+    monkeypatch.setattr(toolchain.sys, "platform", "win32")
+    monkeypatch.setattr(toolchain, "device_compiler_path", lambda: str(nvcc))
+    assert "native Windows" in probe()
+
+
+def test_can_build_jit_follows_the_reason(monkeypatch) -> None:
     probe = toolchain.can_build_jit.__wrapped__
-    monkeypatch.setattr(
-        toolchain, "device_compiler_path", lambda: str(tmp_path / "nvcc")
-    )
-    (tmp_path / "nvcc.exe").write_text("")
+    monkeypatch.setattr(toolchain, "jit_unavailable_reason", lambda: "no nvcc")
+    assert probe() is False
+    monkeypatch.setattr(toolchain, "jit_unavailable_reason", lambda: None)
     assert probe() is True
 
 
@@ -83,3 +94,20 @@ def test_h3_silu_mul_eager_without_compiler(monkeypatch) -> None:
         rtol=0,
         atol=0,
     )
+
+
+@cuda
+def test_convrot_int8_jit_reports_the_toolchain_reason(monkeypatch) -> None:
+    from sglang.multimodal_gen.runtime.layers.quantization import convrot_int8_jit
+
+    capability = convrot_int8_jit.convrot_int8_local_capability()
+    if capability not in convrot_int8_jit.convrot_int8_supported_capabilities():
+        pytest.skip("convrot_int8 JIT does not target this GPU")
+    probe = convrot_int8_jit.jit_convrot_unavailable_reason.__wrapped__
+    monkeypatch.setattr(convrot_int8_jit, "jit_unavailable_reason", lambda: "no jit")
+
+    def build():
+        raise AssertionError("must not attempt a build")
+
+    monkeypatch.setattr(convrot_int8_jit, "load_convrot_int8_module", build)
+    assert probe() == "no jit"
