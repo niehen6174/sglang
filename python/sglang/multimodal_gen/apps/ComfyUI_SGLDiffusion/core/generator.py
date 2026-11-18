@@ -144,6 +144,64 @@ NATIVE_MODEL_TYPES = tuple(_NATIVE_MODEL_TYPES.values())
 _DIRECTORY_MODEL_TYPES = {**_NATIVE_MODEL_TYPES, "ZImagePipeline": "lumina2"}
 
 
+# The worker's CUDA context, allocator slack and first-step activations.
+_WORKER_VRAM_MARGIN = 3 * 1024**3
+
+
+def _worker_weight_bytes(model_path: str, sgld_options: dict) -> int:
+    """GPU bytes the worker's DiT weights take once loaded (an upper bound)."""
+    if sgld_options.get("dit_layerwise_offload"):
+        return 0
+    try:
+        if os.path.isfile(model_path):
+            return os.path.getsize(model_path)
+        if os.path.isdir(model_path):
+            total = 0
+            for root, _, files in os.walk(model_path):
+                if "transformer" not in os.path.relpath(root, model_path):
+                    continue
+                total += sum(
+                    os.path.getsize(os.path.join(root, name))
+                    for name in files
+                    if name.endswith(".safetensors")
+                )
+            return total
+    except OSError:
+        pass
+    return 0
+
+
+def _make_room_for_worker(model_path: str, sgld_options: dict) -> None:
+    """Have ComfyUI unload its own models so the worker's DiT fits on the GPU.
+
+    The worker is a separate process, so ComfyUI's memory manager does not see
+    the DiT it is about to load. When CLIP ran first, the text encoder is still
+    resident: on Linux the worker then fails with CUDA out of memory, and on
+    Windows WDDM silently pages GPU memory to system RAM, making every sampler
+    step several times slower.
+    """
+    try:
+        from comfy import model_management
+    except ImportError:
+        return
+    device = model_management.get_torch_device()
+    if getattr(device, "type", None) != "cuda":
+        return
+    weights = _worker_weight_bytes(model_path, sgld_options)
+    total = model_management.get_total_memory(device)
+    need = min(weights + _WORKER_VRAM_MARGIN, int(total * 0.95))
+    free = model_management.get_free_memory(device)
+    if free >= need:
+        return
+    logger.info(
+        "Freeing ComfyUI models for the SGLD worker: needs %.1f GiB, %.1f GiB free",
+        need / 1024**3,
+        free / 1024**3,
+    )
+    model_management.free_memory(need, device)
+    model_management.soft_empty_cache()
+
+
 def _apply_cache_mode(executor, plugin: dict) -> None:
     """Per-request cache switches; they never restart the worker."""
     mode = plugin.get("cache_mode")
@@ -802,6 +860,7 @@ class SGLDiffusionGenerator:
             if int8_kernel == "auto"
             else {"SGLANG_DIFFUSION_CONVROT_INT8_BACKEND": int8_kernel}
         )
+        _make_room_for_worker(worker_model_path, sgld_options)
         with _worker_env(worker_env):
             self.generator = self.init_generator(
                 worker_model_path,
