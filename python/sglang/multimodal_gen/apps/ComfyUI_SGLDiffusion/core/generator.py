@@ -860,6 +860,11 @@ class SGLDiffusionGenerator:
             if int8_kernel == "auto"
             else {"SGLANG_DIFFUSION_CONVROT_INT8_BACKEND": int8_kernel}
         )
+        # Every sampler step is one worker request, and each stage NaN-scans its
+        # input tensors with a host sync: four syncs per step on Z-Image, which
+        # ComfyUI's own sampling does not pay. Keep any value the user set.
+        if "SGLANG_DIFFUSION_DISABLE_STAGE_NAN_CHECK" not in os.environ:
+            worker_env["SGLANG_DIFFUSION_DISABLE_STAGE_NAN_CHECK"] = "1"
         _make_room_for_worker(worker_model_path, sgld_options)
         with _worker_env(worker_env):
             self.generator = self.init_generator(
