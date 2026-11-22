@@ -134,3 +134,81 @@ def test_load_jit_refuses_without_running_a_compiler(monkeypatch) -> None:
     monkeypatch.setattr(cache, "compute_build_key", fingerprint)
     with pytest.raises(RuntimeError, match="no compiler"):
         loader.load_jit("probe_kernel", cuda_files=["probe.cuh"])
+
+
+@cuda
+def test_h3_comfy_kitchen_qk_norm_rope_matches_eager(monkeypatch) -> None:
+    pytest.importorskip("comfy_kitchen")
+    if not minimax_h3._comfy_kitchen_qknorm_rope():
+        pytest.skip("comfy_kitchen has no CUDA backend here")
+    tokens, heads, head_dim, rope_dim = 300, 4, 128, 96
+    torch.manual_seed(0)
+    freqs = torch.randn(tokens, rope_dim, device="cuda")
+    cache = minimax_h3._rope_cos_sin_cache(freqs, dtype=torch.bfloat16)
+    positions = torch.arange(tokens, device="cuda")
+    # Q/K as strided views of a packed QKV buffer, as the attention layer has them.
+    qkv = torch.randn(tokens, 3, heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    q_norm = torch.nn.RMSNorm(head_dim, eps=1e-6, device="cuda", dtype=torch.bfloat16)
+    k_norm = torch.nn.RMSNorm(head_dim, eps=1e-6, device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        q_norm.weight.uniform_(0.5, 1.5)
+        k_norm.weight.uniform_(0.5, 1.5)
+        monkeypatch.setattr(minimax_h3, "_has_sgl_kernel", lambda: False)
+        want_q, want_k = minimax_h3._apply_qk_norm_rope(
+            qkv[:, 0].clone(),
+            qkv[:, 1].clone(),
+            q_norm,
+            k_norm,
+            head_dim,
+            cache,
+            positions,
+            minimax_h3.RotaryEmbedding(
+                head_size=head_dim,
+                rotary_dim=rope_dim,
+                is_neox_style=True,
+                use_precomputed_cache=False,
+            ),
+        )
+        q, k = qkv[:, 0], qkv[:, 1]
+        assert minimax_h3._comfy_kitchen_qk_norm_rope_(
+            q, k, q_norm, k_norm, cache, positions
+        )
+    torch.testing.assert_close(q, want_q, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(k, want_k, rtol=2e-2, atol=2e-2)
+    # V is untouched by the in-place kernel.
+    assert minimax_h3._comfy_kitchen_rope_table(cache, positions) is (
+        minimax_h3._comfy_kitchen_rope_table(cache, positions)
+    )
+
+
+@cuda
+def test_interleaved_rope_uses_comfy_kitchen_without_flashinfer(monkeypatch) -> None:
+    from sglang.multimodal_gen.runtime.layers.rotary_embedding import utils
+
+    if not utils._comfy_kitchen_rope_available():
+        pytest.skip("comfy_kitchen has no CUDA backend here")
+    monkeypatch.setattr(utils, "flashinfer_apply_rope_inplace", None)
+    torch.manual_seed(0)
+    bsz, seqlen, heads, dim = 2, 96, 4, 128
+    q = torch.randn(bsz, seqlen, heads, dim, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    angles = torch.rand(seqlen, dim // 2, device="cuda") * 10
+    cache = torch.cat((angles.cos(), angles.sin()), dim=-1)
+
+    got_q, got_k = utils.apply_flashinfer_rope_qk_inplace(q, k, cache, is_neox=False)
+
+    def exact(x):
+        x = x.double()
+        cos, sin = (
+            angles.cos().double()[None, :, None],
+            angles.sin().double()[None, :, None],
+        )
+        out = torch.empty_like(x)
+        out[..., ::2] = x[..., ::2] * cos - x[..., 1::2] * sin
+        out[..., 1::2] = x[..., 1::2] * cos + x[..., ::2] * sin
+        return out
+
+    torch.testing.assert_close(got_q.double(), exact(q), rtol=0, atol=2e-2)
+    torch.testing.assert_close(got_k.double(), exact(k), rtol=0, atol=2e-2)
+    # Inputs are not rotated in place, matching the torch fallback.
+    assert not torch.equal(got_q, q)
