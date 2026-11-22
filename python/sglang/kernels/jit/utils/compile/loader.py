@@ -110,6 +110,14 @@ def load_jit(
         raise ValueError("cuda_units needs a header-only module with cuda_files.")
     # A private copy, so the flags below never mutate the caller's list.
     extra_cuda_cflags = list(extra_cuda_cflags or [])
+    # Fail before fingerprinting compilers or writing a build: availability
+    # probes call load_jit directly, and on Windows with nvcc on PATH they
+    # would otherwise run the POSIX build and log compiler errors per kernel.
+    unavailable = toolchain.jit_unavailable_reason()
+    if unavailable is not None:
+        raise RuntimeError(
+            f"Cannot build JIT module {'_'.join(args) or '<unnamed>'}: {unavailable}"
+        )
     if is_hip_runtime():
         extra_cuda_cflags = [
             flag

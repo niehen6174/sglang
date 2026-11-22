@@ -19,6 +19,7 @@ _is_npu = current_platform.is_npu()
 _is_xpu = current_platform.is_xpu()
 
 if _is_cuda:
+    from sglang.kernels.jit.utils import can_build_jit
     from sglang.kernels.ops.activation.activation import silu_and_mul
 elif _is_hip or _is_xpu:
     from sgl_kernel import silu_and_mul
@@ -42,6 +43,9 @@ class SiluAndMul(CustomOp):
     """
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        # On CUDA silu_and_mul is a JIT kernel; without a compiler run eager.
+        if _is_cuda and not can_build_jit():
+            return self.forward_native(x)
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)

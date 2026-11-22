@@ -17,6 +17,7 @@ import logging
 import os
 import pathlib
 import shutil
+import sys
 from typing import List, Tuple
 
 import torch
@@ -84,6 +85,48 @@ def device_compiler_path() -> str:
     if is_hip_runtime():
         return os.path.join(rocm_home(), "bin", "hipcc")
     return os.path.join(cuda_home(), "bin", "nvcc")
+
+
+@cache_once
+def jit_unavailable_reason() -> str | None:
+    """Why JIT kernels cannot be built here, or None when they can.
+
+    Two cases rule the build out before it starts:
+
+    * Native Windows. The generated ``build.ninja`` is written for a POSIX
+      host compiler (``c++``, ``-fPIC``, ``-shared``, ``lib64``), so a CUDA
+      toolkit on PATH is not enough: the first build would fail inside a
+      request. Windows is refused even when ``nvcc`` is present.
+    * No device compiler, for example the CUDA wheels of PyTorch without the
+      CUDA toolkit.
+    """
+    if sys.platform == "win32":
+        return (
+            "JIT builds are not supported on native Windows (the build rules "
+            "target a POSIX compiler), even with the CUDA toolkit installed"
+        )
+    path = device_compiler_path()
+    if not os.path.isfile(path):
+        return f"JIT compiler {path} not found"
+    return None
+
+
+@torch.compiler.assume_constant_result
+@cache_once
+def can_build_jit() -> bool:
+    """Whether JIT kernels can be built here; see `jit_unavailable_reason`.
+
+    Callers that have an eager or Triton equivalent check this before picking
+    a JIT kernel, so such a machine runs the equivalent instead of failing on
+    the first build.
+    """
+    reason = jit_unavailable_reason()
+    if reason is None:
+        return True
+    logger.warning(
+        "%s; kernels with an eager or Triton fallback use it instead.", reason
+    )
+    return False
 
 
 @cache_once
