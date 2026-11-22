@@ -7,9 +7,11 @@ contract accepts packed inference keyword arguments and returns packed logits.
 
 from __future__ import annotations
 
+import importlib.util
 import itertools
 import math
 import os
+import sys
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
@@ -18,6 +20,7 @@ import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+from sglang.kernels.jit.utils import cache_once, can_build_jit
 from sglang.kernels.ops.activation.activation import (
     silu_and_mul_with_activation_rounding,
     silu_and_mul_with_activation_rounding_,
@@ -532,6 +535,7 @@ def _silu_mul(hidden: torch.Tensor, *, reuse_input: bool) -> torch.Tensor:
         and hidden.dtype == _BF16_DTYPE
         and hidden.is_contiguous()
         and hidden.shape[-1] % 16 == 0
+        and can_build_jit()
     ):
         if reuse_input:
             return silu_and_mul_with_activation_rounding_(hidden)
@@ -564,6 +568,7 @@ def _apply_qk_norm(
         and q_norm.eps == k_norm.eps
         and not torch.compiler.is_compiling()
         and current_platform.is_cuda()
+        and can_build_jit()
     ):
         fused_inplace_qknorm(
             q,
@@ -647,6 +652,95 @@ def _apply_rope_cos_sin(
     return torch.cat((x_rot, x_pass), dim=-1)
 
 
+@torch.compiler.assume_constant_result
+@cache_once
+def _has_sgl_kernel() -> bool:
+    """sgl_kernel publishes no Windows build; elsewhere it may be absent too."""
+    return (
+        sys.platform != "win32" and importlib.util.find_spec("sgl_kernel") is not None
+    )
+
+
+@torch.compiler.assume_constant_result
+@cache_once
+def _comfy_kitchen_qknorm_rope() -> bool:
+    """Whether comfy_kitchen's CUDA QK RMSNorm + split-half RoPE kernel is loaded.
+
+    ComfyUI installs comfy_kitchen with prebuilt CUDA kernels on every platform,
+    including Windows, where sglang's JIT QK-norm/RoPE kernel cannot be built.
+    Without either, the norm and the rotation run as a dozen torch ops per layer.
+    """
+    if torch.version.hip is not None:
+        # ROCm keeps its own bit-exact QK-norm/RoPE path.
+        return False
+    try:
+        from comfy_kitchen.registry import registry
+
+        cuda = registry.list_backends().get("cuda") or {}
+    except Exception:
+        return False
+    return (
+        bool(cuda.get("available"))
+        and not cuda.get("disabled")
+        and "rms_rope_split_half_" in cuda.get("capabilities", ())
+    )
+
+
+def _comfy_kitchen_rope_table(
+    cos_sin_cache: torch.Tensor, positions: torch.Tensor
+) -> torch.Tensor:
+    """[S, rot] cos|sin cache rows -> comfy_kitchen's [1, S, 1, rot/2, 2, 2] table.
+
+    Built once per RoPE cache: the cache is request-static and shared by all
+    layers, so the table is memoized on the cache tensor.
+    """
+    memo = getattr(cos_sin_cache, "_sgld_ck_rope_table", None)
+    if memo is not None and memo[0] is positions:
+        return memo[1]
+    rows = cos_sin_cache.index_select(0, positions.long())
+    half = rows.shape[-1] // 2
+    cos, sin = rows[:, :half], rows[:, half:]
+    table = torch.stack((cos, -sin, sin, cos), dim=-1).reshape(
+        1, rows.shape[0], 1, half, 2, 2
+    )
+    cos_sin_cache._sgld_ck_rope_table = (positions, table)
+    return table
+
+
+def _comfy_kitchen_qk_norm_rope_(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    q_norm: nn.RMSNorm,
+    k_norm: nn.RMSNorm,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+) -> bool:
+    """Run QK RMSNorm + RoPE in place with comfy_kitchen; False if it does not apply."""
+    if not (
+        q.is_cuda
+        and q.dtype == k.dtype == cos_sin_cache.dtype == _BF16_DTYPE
+        and q.stride(-1) == k.stride(-1) == 1
+        and q_norm.eps is not None
+        and q_norm.eps == k_norm.eps
+        and not torch.compiler.is_compiling()
+        and _comfy_kitchen_qknorm_rope()
+    ):
+        return False
+    import comfy_kitchen
+
+    table = _comfy_kitchen_rope_table(cos_sin_cache, positions)
+    comfy_kitchen.rms_rope_split_half_(
+        q.unsqueeze(0),
+        k.unsqueeze(0),
+        table,
+        q_norm.weight.detach().to(q.dtype),
+        k_norm.weight.detach().to(k.dtype),
+        epsilon=q_norm.eps,
+        rot_dim=cos_sin_cache.shape[-1],
+    )
+    return True
+
+
 def _apply_rope_qk(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -655,11 +749,18 @@ def _apply_rope_qk(
     *,
     rotary_emb: RotaryEmbedding,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if not q.is_cuda:
+    if q.is_cuda and not _has_sgl_kernel():
+        # The same NeoX rotation sgl_kernel applies, with the cache rows
+        # gathered by position. Not bit-identical to the kernel.
+        cos_sin_cache = cos_sin_cache.index_select(0, positions.long())
+    if not q.is_cuda or not _has_sgl_kernel():
         half = cos_sin_cache.shape[-1] // 2
         cos, sin = cos_sin_cache.split(half, dim=-1)
         # forward_npu sends 3D q/k to forward_native; npu_rotary_mul needs BSND.
-        q, k = rotary_emb(query=q.unsqueeze(0), key=k.unsqueeze(0), cos=cos, sin=sin)
+        # CUDA without sgl_kernel calls forward_native directly: forward_cuda
+        # would pick FlashInfer, which such a runtime usually lacks too.
+        rotate = rotary_emb.forward_native if q.is_cuda else rotary_emb
+        q, k = rotate(query=q.unsqueeze(0), key=k.unsqueeze(0), cos=cos, sin=sin)
         return q.squeeze(0), k.squeeze(0)
 
     from sgl_kernel import rotary_embedding as apply_sgl_kernel_rotary_embedding
@@ -1720,7 +1821,9 @@ class MiniMaxH3Attention(nn.Module):
                     rope_dim=cos_sin_cache.shape[-1],
                     round_norm_before_rope=True,
                 )
-            else:
+            elif not _comfy_kitchen_qk_norm_rope_(
+                q, k, self.q_norm, self.k_norm, cos_sin_cache, positions
+            ):
                 q, k = _apply_qk_norm_rope(
                     q,
                     k,

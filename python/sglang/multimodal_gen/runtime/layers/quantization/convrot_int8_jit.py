@@ -29,6 +29,7 @@ from collections.abc import Sequence
 import torch
 from torch.nn.parameter import Parameter
 
+from sglang.kernels.jit.utils.compile import jit_unavailable_reason
 from sglang.kernels.ops.gemm.convrot_int8 import (
     convrot_int8_fused_linear,
     convrot_int8_linear_prequant,
@@ -104,6 +105,9 @@ def jit_convrot_unavailable_reason() -> str | None:
         return "not a CUDA device"
     if capability not in convrot_int8_supported_capabilities():
         return _unsupported_capability_reason(capability)
+    toolchain_reason = jit_unavailable_reason()
+    if toolchain_reason is not None:
+        return toolchain_reason
     logger.info(
         "convrot_int8: loading the JIT ops for CC %d.%d (the first use on a "
         "machine compiles them, about a minute)",
