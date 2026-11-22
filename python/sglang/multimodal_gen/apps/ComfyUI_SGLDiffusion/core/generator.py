@@ -407,6 +407,11 @@ class SGLDiffusionGenerator:
         # Each sampler step is its own request carrying ComfyUI tensors; a
         # synthetic or request-based warmup has no such inputs to run with.
         kwargs["warmup_mode"] = "off"
+        if sys.platform == "win32":
+            # Windows has no FlashAttention / FlashInfer builds; SDPA is the
+            # attention backend that is always there.
+            if not kwargs.get("attention_backend"):
+                kwargs["attention_backend"] = "torch_sdpa"
         if pipeline_class_name in _H3_MODEL_IDS:
             kwargs.setdefault("model_id", _H3_MODEL_IDS[pipeline_class_name])
         kwargs = self._server_args_kwargs(kwargs)
