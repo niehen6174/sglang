@@ -22,7 +22,6 @@ from ..executors.minimax_h3 import (
 from ..executors.qwen_image21 import QwenImage21Executor
 from ..executors.zimage import ZImageExecutor
 from ..options import ATTENTION_DISPLAY, INT8_GEMM_DISPLAY, PLUGIN_KEYS
-from .preflight import check_model_options, check_sgld_options
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +139,67 @@ def _applied(lora):
 
 _NATIVE_MODEL_TYPES = {"FastH3Pipeline": "fast_h3", "VDNH3Pipeline": "vdn_h3"}
 NATIVE_MODEL_TYPES = tuple(_NATIVE_MODEL_TYPES.values())
+# Native directories SGLDNativeModelLoader accepts. Z-Image stays out of
+# NATIVE_MODEL_TYPES: its ComfyUI single files still load through SGLDUNETLoader.
+_DIRECTORY_MODEL_TYPES = {**_NATIVE_MODEL_TYPES, "ZImagePipeline": "lumina2"}
+
+
+# The worker's CUDA context, allocator slack and first-step activations.
+_WORKER_VRAM_MARGIN = 3 * 1024**3
+
+
+def _worker_weight_bytes(model_path: str, sgld_options: dict) -> int:
+    """GPU bytes the worker's DiT weights take once loaded (an upper bound)."""
+    if sgld_options.get("dit_layerwise_offload"):
+        return 0
+    try:
+        if os.path.isfile(model_path):
+            return os.path.getsize(model_path)
+        if os.path.isdir(model_path):
+            total = 0
+            for root, _, files in os.walk(model_path):
+                if "transformer" not in os.path.relpath(root, model_path):
+                    continue
+                total += sum(
+                    os.path.getsize(os.path.join(root, name))
+                    for name in files
+                    if name.endswith(".safetensors")
+                )
+            return total
+    except OSError:
+        pass
+    return 0
+
+
+def _make_room_for_worker(model_path: str, sgld_options: dict) -> None:
+    """Have ComfyUI unload its own models so the worker's DiT fits on the GPU.
+
+    The worker is a separate process, so ComfyUI's memory manager does not see
+    the DiT it is about to load. When CLIP ran first, the text encoder is still
+    resident: on Linux the worker then fails with CUDA out of memory, and on
+    Windows WDDM silently pages GPU memory to system RAM, making every sampler
+    step several times slower.
+    """
+    try:
+        from comfy import model_management
+    except ImportError:
+        return
+    device = model_management.get_torch_device()
+    if getattr(device, "type", None) != "cuda":
+        return
+    weights = _worker_weight_bytes(model_path, sgld_options)
+    total = model_management.get_total_memory(device)
+    need = min(weights + _WORKER_VRAM_MARGIN, int(total * 0.95))
+    free = model_management.get_free_memory(device)
+    if free >= need:
+        return
+    logger.info(
+        "Freeing ComfyUI models for the SGLD worker: needs %.1f GiB, %.1f GiB free",
+        need / 1024**3,
+        free / 1024**3,
+    )
+    model_management.free_memory(need, device)
+    model_management.soft_empty_cache()
 
 
 def _apply_cache_mode(executor, plugin: dict) -> None:
@@ -169,12 +229,19 @@ def _worker_env(values: dict):
 def native_model_type(model_dir: str) -> str:
     with open(os.path.join(model_dir, "model_index.json")) as f:
         class_name = json.load(f).get("_class_name")
-    if class_name not in _NATIVE_MODEL_TYPES:
+    if class_name not in _DIRECTORY_MODEL_TYPES:
         raise ValueError(
             f"{model_dir}: native model {class_name!r} is not supported by "
-            f"SGLDNativeModelLoader; supported: {sorted(_NATIVE_MODEL_TYPES)}"
+            f"SGLDNativeModelLoader; supported: {sorted(_DIRECTORY_MODEL_TYPES)}"
         )
-    return _NATIVE_MODEL_TYPES[class_name]
+    return _DIRECTORY_MODEL_TYPES[class_name]
+
+
+def _zimage_unet_config_from_native(model_dir: str) -> dict:
+    """Keys that make ComfyUI pick its ZImage config over the wider Lumina2."""
+    with open(os.path.join(model_dir, "transformer", "config.json")) as f:
+        c = json.load(f)
+    return {"image_model": "lumina2", "dim": c["dim"]}
 
 
 def _h3_unet_config_from_native(model_dir: str) -> dict:
@@ -630,12 +697,18 @@ class SGLDiffusionGenerator:
         )
 
         if os.path.isdir(model_path):
-            model_config = model_detection.model_config_from_unet_config(
-                _h3_unet_config_from_native(model_path)
-            )
+            if native_model_type(model_path) == "lumina2":
+                unet_config = _zimage_unet_config_from_native(model_path)
+                model_type = "lumina2"
+            else:
+                unet_config = _h3_unet_config_from_native(model_path)
+                model_type = "minimax_h3"
+            model_config = model_detection.model_config_from_unet_config(unet_config)
+            if model_config is None:
+                raise ValueError(f"No ComfyUI model config matches {model_path!r}")
             model_config.set_inference_dtype(torch.bfloat16, None)
             model_config.unet_config["disable_unet_model_creation"] = True
-            return model_config.get_model({}), model_config, "minimax_h3"
+            return model_config.get_model({}), model_config, model_type
 
         sd = _load_state_dict_for_detection(model_path)
         diffusion_model_prefix = model_detection.unet_prefix_from_state_dict(sd)
@@ -705,6 +778,10 @@ class SGLDiffusionGenerator:
                 "SGLDUNETLoader weight_dtype must be 'default': the SGLD worker "
                 "does not use it; select quantization in SGLDOptions instead"
             )
+        # preflight imports the SGLang runtime; keep it off the node-import path
+        # so the nodes still register when the runtime is missing.
+        from .preflight import check_model_options, check_sgld_options
+
         check_sgld_options(sgld_options)
         plugin = {k: sgld_options.pop(k) for k in PLUGIN_KEYS if k in sgld_options}
         from sglang.multimodal_gen.apps.ComfyUI_SGLDiffusion.worker_patches import (
@@ -783,6 +860,12 @@ class SGLDiffusionGenerator:
             if int8_kernel == "auto"
             else {"SGLANG_DIFFUSION_CONVROT_INT8_BACKEND": int8_kernel}
         )
+        # Every sampler step is one worker request, and each stage NaN-scans its
+        # input tensors with a host sync: four syncs per step on Z-Image, which
+        # ComfyUI's own sampling does not pay. Keep any value the user set.
+        if "SGLANG_DIFFUSION_DISABLE_STAGE_NAN_CHECK" not in os.environ:
+            worker_env["SGLANG_DIFFUSION_DISABLE_STAGE_NAN_CHECK"] = "1"
+        _make_room_for_worker(worker_model_path, sgld_options)
         with _worker_env(worker_env):
             self.generator = self.init_generator(
                 worker_model_path,

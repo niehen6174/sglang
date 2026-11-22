@@ -205,12 +205,18 @@ class SGLDiffusionExecutor(torch.nn.Module):
             f"with SGLDLoraLoader, or convert the workflow: {CONVERT_COMMAND}"
         )
 
-    @staticmethod
-    def should_suppress_logs(timestep):
-        """Determine if logs should be suppressed based on timestep value."""
-        if torch.is_tensor(timestep):
-            return bool((timestep < 1.0).item())
-        return bool(timestep < 1.0)
+    def should_suppress_logs(self, timestep=None) -> bool:
+        """Log only the first worker request of each sampler run.
+
+        Each sampler step is one request. Deciding from the timestep value
+        (``timestep < 1``) read a CUDA tensor back on every step, a host sync
+        in the middle of sampling.
+        """
+        run_id = getattr(self, "_run_id", 0)
+        if getattr(self, "_logged_run_id", None) == run_id:
+            return True
+        self._logged_run_id = run_id
+        return False
 
     def set_lora(
         self,
