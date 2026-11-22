@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import os
+import sys
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
@@ -22,6 +24,22 @@ import torch
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
+
+
+def cuda_ipc_enabled() -> bool:
+    """Whether local scheduler hops share CUDA tensors through CUDA IPC.
+
+    Off on Windows: CUDA supports IPC there for compatibility only, at a cost.
+    Every ComfyUI sampler step is one hop each way, and opening the handles
+    left the GPU idle for about a third of each step on an RTX 4090; a host
+    copy of the few MiB of latents is cheaper. SGLANG_DIFFUSION_CUDA_IPC=1 or 0
+    overrides the platform default.
+    """
+    value = os.environ.get("SGLANG_DIFFUSION_CUDA_IPC")
+    if value is not None and value.strip():
+        return value.strip().lower() not in ("0", "false", "no", "off")
+    return sys.platform != "win32"
+
 
 # Producer-side retain: CUDA IPC cannot open a handle in the same process,
 # and the allocation must stay alive until the consumer maps it.
@@ -136,8 +154,12 @@ def spill_cuda_tensors(value: Any, *, in_place: bool = False) -> Any:
 
     By default dataclasses are shallow-copied so the caller's tensors stay
     intact (needed on the client, which still holds the original ``Req``).
-    Scheduler replies can pass ``in_place=True``.
+    Scheduler replies can pass ``in_place=True``. Without CUDA IPC (see
+    ``cuda_ipc_enabled``) tensors stay in place and pickle copies them through
+    host memory.
     """
+    if not cuda_ipc_enabled():
+        return value
     return _map_tree(value, _spill_one, copy_dataclasses=not in_place)
 
 
@@ -151,18 +173,28 @@ def _spill_one(value: Any) -> Any:
         try:
             return CudaIpcRef.from_tensor(value)
         except RuntimeError as exc:
-            # cudaMallocAsync (ComfyUI default) cannot export IPC handles.
-            # Leave the tensor in place so pickle falls back to a host copy.
+            # cudaMallocAsync (ComfyUI default) cannot export IPC handles, and
+            # expandable_segments refuses to unless
+            # TORCH_CUDA_EXPANDABLE_SEGMENTS_IPC=1. Leave the tensor in place
+            # so pickle falls back to a host copy.
             msg = str(exc)
-            if "shareIpcHandle" not in msg and "cudaMallocAsync" not in msg:
+            if not any(
+                marker in msg
+                for marker in (
+                    "shareIpcHandle",
+                    "cudaMallocAsync",
+                    "expandable_segments",
+                    "IPC handles are disabled",
+                )
+            ):
                 raise
             global _WARNED_ASYNC_ALLOC
             if not _WARNED_ASYNC_ALLOC:
                 _WARNED_ASYNC_ALLOC = True
                 logger.warning(
                     "CUDA IPC export failed (%s); falling back to a host pickle "
-                    "copy. ComfyUI's default cudaMallocAsync pool cannot export "
-                    "IPC handles.",
+                    "copy. cudaMallocAsync and expandable_segments allocations "
+                    "cannot export IPC handles.",
                     exc,
                 )
     return value
