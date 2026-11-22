@@ -40,9 +40,44 @@ _DYNAMIC_CUDNN_SDPA_BACKEND_CLS_STR = "sglang.multimodal_gen.runtime.layers.atte
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
-# pytorch 2.5 uses cudnn sdpa by default, which will cause crash on some models
-# see https://github.com/huggingface/diffusers/issues/9704 for details
-torch.backends.cuda.enable_cudnn_sdp(False)
+
+def _configure_cuda_sdpa() -> None:
+    """Pick the SDPA kernels that unconstrained ``scaled_dot_product_attention`` uses.
+
+    With Flash SDPA available, cuDNN SDPA is turned off: PyTorch 2.5 picked it
+    by default and it crashed on some models (diffusers#9704).
+
+    The Windows CUDA wheels of PyTorch are built without Flash SDPA. There the
+    default order (Flash, memory-efficient, math, cuDNN) lands on the
+    memory-efficient kernel, which is 2-2.5x slower than cuDNN at diffusion
+    sequence lengths. Rank cuDNN first instead, as ComfyUI does on that build.
+    """
+    flash_usable = (
+        torch.backends.cuda.is_flash_attention_available()
+        and torch.backends.cuda.flash_sdp_enabled()
+    )
+    set_order = getattr(torch._C, "_set_sdp_priority_order", None)
+    if flash_usable or set_order is None:
+        torch.backends.cuda.enable_cudnn_sdp(False)
+        return
+    from torch.nn.attention import SDPBackend
+
+    torch.backends.cuda.enable_cudnn_sdp(True)
+    set_order(
+        [
+            int(backend)
+            for backend in (
+                SDPBackend.CUDNN_ATTENTION,
+                SDPBackend.FLASH_ATTENTION,
+                SDPBackend.EFFICIENT_ATTENTION,
+                SDPBackend.MATH,
+            )
+        ]
+    )
+    logger.info("Flash SDPA is not available; SDPA prefers cuDNN attention.")
+
+
+_configure_cuda_sdpa()
 
 
 @lru_cache(maxsize=None)
